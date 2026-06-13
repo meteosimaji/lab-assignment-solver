@@ -32,6 +32,12 @@ R1 -> R2 -> Q -> Uavg -> Umin
 Other modes change the objective, but still solve the selected objective
 exactly.
 
+The exactness claim is for the implemented structured objectives only:
+lexicographic rank/fill objectives, additive rank/outside/change costs,
+separable convex fill penalties, and the documented `weighted-exact` scalar
+objective with nonnegative integer weights. It is not a claim for arbitrary
+black-box assignment objectives.
+
 ## Why Flow Is the Right Core
 
 The assignment can be represented as a bipartite flow network:
@@ -122,6 +128,15 @@ thresholds.  If the lower bound is already no better than the incumbent, the
 whole box is pruned.  This is branch-and-bound with a mathematical lower bound,
 not a heuristic.
 
+The lower bound follows from monotonic relaxation. For any assignment `x` in
+the box, `q_low <= Q(x) <= q_high` and
+`u_low <= Umin(x) <= u_high`. The relaxed corner `(q_high, u_low)` has a
+superset of the feasible assignments, so `A(q_high, u_low) <= A(x)`. Because
+all weights are nonnegative, `wQ*q_low <= wQ*Q(x)` and
+`-wU*u_high <= -wU*Umin(x)`. Adding these inequalities gives a value no larger
+than the full weighted score of any assignment in the box, so pruning on this
+bound cannot remove a better solution.
+
 The initial wide-rank seed is skipped when the rank axis is large because the
 first relaxed corner supplies a valid incumbent anyway.  This avoids a costly
 pre-scan on full-preference inputs while preserving exactness.
@@ -139,8 +154,10 @@ feasible set or objective value.
   lab set.
 - Active-rank-row grouping: optimization merges students whose active edges and
   costs are identical.
-- Same-rank-table shortcut: if all students have the same rank table, only lab
-  counts matter, so the count problem is solved directly and expanded.
+- Same-rank-table shortcut: in the fair-mode path, if all active students have
+  the same rank table after the worst-rank threshold is fixed, only lab counts
+  matter, so the count problem is solved directly and expanded. Other
+  rank-first modes remain exact but use the general grouped min-cost-flow path.
 - Capacity-bucket average-fill comparison: equal denominators are combined
   exactly.
 - Relaxed-corner cache: repeated weighted-exact corners are solved once.
@@ -175,16 +192,23 @@ laboratories, each implemented exact mode reduces to one or more integral
 min-cost-flow or lower-bound feasibility solves.  `Q` has at most `M + 1`
 relevant thresholds, and `Umin` has at most
 `sum_j min(capacity_j, N) + 1` fill-ratio candidates before equivalent vectors
-are compressed.  `weighted-exact` is therefore an exact search over a
-polynomial threshold grid; branch-and-bound is a pruning strategy over that
-grid, not the source of correctness.
+are compressed. Under the public benchmark limits this quantity is at most
+`M*N + 1 <= 256*1024 + 1`; for larger OSS inputs the same polynomial expression
+scales with the supplied `M` and `N`. `weighted-exact` is therefore an exact
+search over a polynomial threshold grid; branch-and-bound is a pruning strategy
+over that grid, not the source of correctness.
 
-An arbitrary objective `F(assignment)` is outside that theorem.  With only
+An arbitrary objective `F(assignment)` is outside that theorem. With only
 oracle access to `F`, exact optimization can require checking exponentially
-many feasible assignments.  With a succinct unrestricted formula for `F`, the
-objective can encode NP-hard variants.  New objective modes should therefore
-either reduce to min-cost flow, polynomial threshold enumeration, or another
-proved exact polynomial subroutine, or be documented as exponential/heuristic.
+many feasible assignments. With a succinct unrestricted formula for `F`, the
+objective can encode SAT: let each variable correspond to a student choosing
+one of two laboratories, and let the objective evaluate the Boolean formula
+under the induced truth assignment, scoring 0 for satisfying assignments and 1
+otherwise. A polynomial-time exact optimizer for all such succinct objectives
+would decide whether the optimum is 0 and therefore solve SAT in polynomial
+time, implying P=NP. New objective modes should therefore either reduce to
+min-cost flow, polynomial threshold enumeration, or another proved exact
+polynomial subroutine, or be documented as exponential/heuristic.
 
 The algorithm is also not claiming to beat every possible specialized solver on
 every synthetic input.  The claim is narrower and stronger: for the stated

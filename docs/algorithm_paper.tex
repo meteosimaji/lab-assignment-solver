@@ -241,15 +241,16 @@ Because min-cost flow globally minimizes this tuple over all complete flows,
 the chosen assignment is not merely locally good.  It is the best assignment
 under the stated lexicographic objective.
 
-There is one important fast path.  If every student has exactly the same rank
-table, then exchanging two students never changes any of the five metrics.
-The only information that matters is the count \(n_j\) assigned to each
-laboratory.  In that special case, the program skips the student-laboratory
-flow and optimizes the count vector directly: it fills lower-rank laboratories
-before higher-rank ones, then maximizes the exact minimum fill rate, and only
-then maximizes the exact average fill rate.  This is not a heuristic shortcut;
-it solves the same objective on a smaller state space because all students are
-interchangeable.
+There is one important fast path in the fair-mode route.  After the worst-rank
+threshold has been fixed, if every active student has exactly the same rank
+table, then exchanging two students never changes the fair-mode objective
+components.  The only information that matters is the count \(n_j\) assigned
+to each laboratory.  In that special case, the program skips the
+student-laboratory flow and optimizes the count vector directly: it fills
+lower-rank laboratories before higher-rank ones, then maximizes the exact
+minimum fill rate, and only then maximizes the exact average fill rate.  Other
+rank-first modes still remain exact, but they use the general grouped
+min-cost-flow path rather than this count-only shortcut.
 
 \section{Formal Correctness Lemmas}
 
@@ -708,6 +709,24 @@ box is pruned only when
 cannot beat the incumbent weighted score.  This branch-and-bound is exact:
 the rank constraint is only relaxed, the minimum-fill constraint is only
 relaxed, and the non-additive terms are bounded optimistically.
+Indeed, for any assignment \(x\) in the box,
+\[
+  q_{\mathrm{lo}}\le Q(x)\le q_{\mathrm{hi}},\qquad
+  u_{\mathrm{lo}}\le U_{\min}(x)\le u_{\mathrm{hi}}.
+\]
+The relaxed corner \((q_{\mathrm{hi}},u_{\mathrm{lo}})\) has a superset of the
+box's feasible assignments, so
+\[
+  A(q_{\mathrm{hi}},u_{\mathrm{lo}})\le A(x).
+\]
+Because all weights are nonnegative,
+\[
+  w_3 q_{\mathrm{lo}}\le w_3 Q(x),
+  \qquad
+  -w_5 u_{\mathrm{hi}}\le -w_5 U_{\min}(x).
+\]
+Adding these inequalities gives a lower bound on the full weighted score of
+every assignment in the box, so pruning cannot remove a better solution.
 When the common denominator \(L\) and the scaled costs fit safely in signed
 64-bit arithmetic, the \(U_{\mathrm{avg}}\) reward is folded into the ordinary
 edge costs by minimizing
@@ -735,8 +754,11 @@ big-integer score and copied solution.
 
 \section{Implementation Notes}
 
-The implementation is a single C11 file, \texttt{assignment.c}.  It uses only
-standard C library facilities.  Important implementation choices are:
+The implementation is a single C11 file, \texttt{assignment.c}.  The sequential
+solver core uses portable C data structures and arithmetic.  Optional terminal
+confirmation and process-parallel portfolio execution use POSIX facilities
+when they are available; Windows/MinGW builds fall back to deterministic serial
+portfolio solving.  Important implementation choices are:
 \begin{itemize}[leftmargin=2em]
   \item Dinic's algorithm for lower-bound feasibility.
   \item Successive shortest augmenting paths with potentials for min-cost
@@ -1006,9 +1028,11 @@ active grouping or repeated preferences.  The min-cost flow sends at most
 indexed-heap shortest path computation.  The exact \(U_{\min}\) phase adds a
 binary search over at most
 \[
-  \sum_j \min(c_j,N) \leq 262144
+  \sum_j \min(c_j,N)
 \]
-rational candidates.
+rational candidates.  Under the target benchmark limits, this is at most
+\(MN\le 256\cdot1024=262144\); for larger OSS inputs, the same polynomial
+bound scales with the supplied \(M\) and \(N\).
 The exact \(U_{\mathrm{avg}}\) phase is run only once after the previous
 objectives are fixed, and is skipped when the average fill rate is already
 fixed by the counts or by uniform positive capacities.  Let \(P\leq M\) be
@@ -1196,9 +1220,17 @@ Instead, for the stated assignment model and the selected structured
 objective, it uses total unimodularity and integrality of network flow,
 together with polynomial threshold enumeration and exact rational comparison,
 to obtain a global optimum exactly.  This is not a claim of a universal
-polynomial-time optimizer for arbitrary assignment objectives.  Unrestricted
-black-box or succinct nonlinear objectives may require exponential search or
-can encode NP-hard variants.
+polynomial-time optimizer for arbitrary assignment objectives.  With only
+black-box access to an arbitrary objective, exact optimization can require
+exponential search.  With a succinct unrestricted objective, the model can
+encode SAT: let each Boolean variable be represented by a student choosing one
+of two laboratories, and let the objective evaluate a Boolean formula under
+that induced truth assignment, scoring zero exactly on satisfying assignments.
+A polynomial-time exact optimizer for every such succinct objective would
+decide whether the optimum is zero and would therefore solve SAT in polynomial
+time, implying \(P=NP\).  The implemented solver deliberately avoids this
+claim by supporting only structured objective families with flow, threshold,
+rational-comparison, or separable-convex structure.
 
 The default mode is an exact Pareto-lexicographic flow solver for the
 objective order:

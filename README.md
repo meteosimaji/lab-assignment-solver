@@ -26,10 +26,15 @@ heuristic acceptance is used.
 This is not a universal optimizer for every possible scoring rule.  If the
 objective is an arbitrary black-box function of the complete assignment, exact
 optimization has no flow structure to exploit and can require exponentially
-many objective queries.  If an unrestricted objective is given succinctly, it
-can encode NP-hard assignment variants such as pairwise student interaction
-rewards or general nonlinear subset penalties.  A universal polynomial-time
-exact solver for all such objectives would imply P=NP.
+many objective queries.  If an unrestricted objective is given succinctly,
+the optimization problem already contains NP-hard problems: for example, with
+two assignment choices per variable, a Boolean formula can be evaluated by the
+objective and score 0 exactly when the corresponding truth assignment satisfies
+the formula.  A polynomial-time exact optimizer for every such unrestricted
+succinct objective would therefore decide SAT in polynomial time, implying
+P=NP.  The repository avoids that claim by supporting only objective families
+with proved flow, threshold, rational-comparison, or separable-convex
+structure.
 
 ## Build
 
@@ -518,13 +523,13 @@ the final average-fill tie-break, the program converts
 integer comparison with an internal unsigned big-integer type, so it does not
 rely on floating point or scaled approximations.
 
-When every student has the same rank table, the solver switches to an exact
-count-based shortcut.  In that case student identities are interchangeable:
-only the number assigned to each laboratory can affect the five metrics.  The
-shortcut therefore optimizes the laboratory counts directly, then expands the
-counts back to student-wise output.  This keeps the same objective value while
-avoiding the full min-cost-flow run on common stress cases where many students
-submit the same preferences.
+In the fair-mode path, when all active students have the same rank table after
+the worst-rank threshold is fixed, the solver switches to an exact count-based
+shortcut.  In that case student identities are interchangeable: only the number
+assigned to each laboratory can affect the fair-mode metrics.  The shortcut
+therefore optimizes the laboratory counts directly, then expands the counts
+back to student-wise output.  Other rank-first modes remain exact but use the
+general grouped min-cost-flow path.
 
 When only some students share identical active rank rows for the computed worst
 rank bound, the general min-cost-flow path groups those students into one flow

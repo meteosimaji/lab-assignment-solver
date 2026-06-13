@@ -1890,7 +1890,7 @@ static int stdin_is_terminal(void)
 #ifdef _WIN32
     return _isatty(_fileno(stdin)) != 0;
 #else
-    return isatty(fileno(stdin)) != 0;
+    return isatty(0) != 0;
 #endif
 }
 
