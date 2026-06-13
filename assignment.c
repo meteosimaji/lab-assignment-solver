@@ -11,6 +11,7 @@
 #include <io.h>
 #include <windows.h>
 #else
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -32,6 +33,16 @@
 #define LIGHT_PORTFOLIO_CANDIDATE_COUNT 5
 #define MAX_PORTFOLIO_CANDIDATES 8
 #define AUTO_STUDENT_ID_WIDTH -1
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define NORETURN _Noreturn
+#elif defined(__GNUC__) || defined(__clang__)
+#define NORETURN __attribute__((noreturn))
+#elif defined(_MSC_VER)
+#define NORETURN __declspec(noreturn)
+#else
+#define NORETURN
+#endif
 
 typedef struct ConstraintSet ConstraintSet;
 typedef struct RankCostModel RankCostModel;
@@ -85,6 +96,7 @@ typedef struct {
     size_t buffer_size;
     size_t position;
     size_t length;
+    int reached_eof;
 } FastInput;
 
 typedef struct {
@@ -495,8 +507,8 @@ static void *checked_malloc(size_t byte_count);
 static void *checked_calloc(size_t item_count, size_t item_size);
 static void *checked_realloc(void *pointer, size_t byte_count);
 static size_t checked_multiply_size(size_t left, size_t right, const char *context);
-static void fail_with_message(const char *message);
-static void fail_with_context(const char *context, const char *detail);
+static NORETURN void fail_with_message(const char *message);
+static NORETURN void fail_with_context(const char *context, const char *detail);
 static StudentGroups build_student_groups(const ProblemData *problem_data,
                                           int max_rank,
                                           StudentGroupingMode grouping_mode);
@@ -512,11 +524,13 @@ static const char *reason_for_assignment(const ProblemData *problem_data,
                                          const int *assignment,
                                          const EvaluationMetrics *metrics,
                                          int student_index);
-static void fail_with_context_format(const char *context, const char *format, ...);
-static void fail_with_context_format_hint(const char *context,
-                                          const char *hint,
-                                          const char *format,
-                                          ...);
+static NORETURN void fail_with_context_format(const char *context,
+                                              const char *format,
+                                              ...);
+static NORETURN void fail_with_context_format_hint(const char *context,
+                                                   const char *hint,
+                                                   const char *format,
+                                                   ...);
 static void solver_profile_init(SolverProfile *profile);
 static void solver_profile_write(const char *profile_path,
                                  const SolverProfile *profile);
@@ -1336,6 +1350,9 @@ static int wide_product_compare(WideProduct left, WideProduct right)
 
 static void *checked_malloc(size_t byte_count)
 {
+    if (byte_count == 0U) {
+        byte_count = 1U;
+    }
     void *pointer = malloc(byte_count);
     if (pointer == NULL) {
         fprintf(stderr, "error: memory allocation failed\n");
@@ -1346,6 +1363,12 @@ static void *checked_malloc(size_t byte_count)
 
 static void *checked_calloc(size_t item_count, size_t item_size)
 {
+    if (item_count == 0U) {
+        item_count = 1U;
+    }
+    if (item_size == 0U) {
+        item_size = 1U;
+    }
     void *pointer = calloc(item_count, item_size);
     if (pointer == NULL) {
         fprintf(stderr, "error: memory allocation failed\n");
@@ -1356,6 +1379,9 @@ static void *checked_calloc(size_t item_count, size_t item_size)
 
 static void *checked_realloc(void *pointer, size_t byte_count)
 {
+    if (byte_count == 0U) {
+        byte_count = 1U;
+    }
     void *new_pointer = realloc(pointer, byte_count);
     if (new_pointer == NULL) {
         fprintf(stderr, "error: memory allocation failed\n");
@@ -1414,21 +1440,21 @@ static void remove_cleanup_paths(void)
     }
 }
 
-static void fail_with_message(const char *message)
+static NORETURN void fail_with_message(const char *message)
 {
     remove_cleanup_paths();
     fprintf(stderr, "error: %s\n", message);
     exit(EXIT_FAILURE);
 }
 
-static void fail_with_context(const char *context, const char *detail)
+static NORETURN void fail_with_context(const char *context, const char *detail)
 {
     remove_cleanup_paths();
     fprintf(stderr, "error: %s: %s\n", context, detail);
     exit(EXIT_FAILURE);
 }
 
-static void fail_with_context_format(const char *context, const char *format, ...)
+static NORETURN void fail_with_context_format(const char *context, const char *format, ...)
 {
     va_list arguments;
 
@@ -1441,10 +1467,10 @@ static void fail_with_context_format(const char *context, const char *format, ..
     exit(EXIT_FAILURE);
 }
 
-static void fail_with_context_format_hint(const char *context,
-                                          const char *hint,
-                                          const char *format,
-                                          ...)
+static NORETURN void fail_with_context_format_hint(const char *context,
+                                                   const char *hint,
+                                                   const char *format,
+                                                   ...)
 {
     va_list arguments;
 
@@ -1633,6 +1659,7 @@ static void fast_input_open(FastInput *input, const char *path)
     input->buffer_size = FAST_INPUT_BUFFER_SIZE;
     input->position = 0U;
     input->length = 0U;
+    input->reached_eof = 0;
     if (input->file == NULL) {
         fail_with_context(path, "cannot open file");
     }
@@ -1650,6 +1677,7 @@ static void fast_input_close(FastInput *input)
     input->buffer_size = 0U;
     input->position = 0U;
     input->length = 0U;
+    input->reached_eof = 0;
     if (close_status != 0) {
         fail_with_context(path, "close failed");
     }
@@ -1658,6 +1686,9 @@ static void fast_input_close(FastInput *input)
 static int fast_input_getc(FastInput *input)
 {
     if (input->position >= input->length) {
+        if (input->reached_eof) {
+            return EOF;
+        }
         input->length = fread(input->buffer,
                               1U,
                               input->buffer_size,
@@ -1667,6 +1698,7 @@ static int fast_input_getc(FastInput *input)
             if (ferror(input->file)) {
                 fail_with_context(input->path, "read failed");
             }
+            input->reached_eof = 1;
             return EOF;
         }
     }
@@ -5615,6 +5647,23 @@ static int minimum_count_vectors_equal(const int *left_counts,
                   (size_t)lab_count * sizeof(int)) == 0;
 }
 
+static unsigned long long minimum_count_vector_hash(const int *minimum_counts,
+                                                    int lab_count)
+{
+    int lab_index;
+    unsigned long long hash_value = FNV_OFFSET_BASIS;
+    for (lab_index = 0; lab_index < lab_count; lab_index++) {
+        unsigned int count_value = (unsigned int)minimum_counts[lab_index];
+        int byte_index;
+        for (byte_index = 0; byte_index < 4; byte_index++) {
+            hash_value ^= (unsigned long long)(count_value & 255U);
+            hash_value *= FNV_PRIME;
+            count_value >>= 8;
+        }
+    }
+    return hash_value;
+}
+
 static void minimum_count_candidate_list_free(MinimumCountCandidateList *list)
 {
     int candidate_index;
@@ -5643,6 +5692,8 @@ static MinimumCountCandidateList build_minimum_count_candidates(
 {
     MinimumCountCandidateList candidates;
     RatioList ratios;
+    int hash_size;
+    int *candidate_hash_indices;
     int ratio_index;
 
     candidates.items = NULL;
@@ -5661,9 +5712,17 @@ static MinimumCountCandidateList build_minimum_count_candidates(
         ratio_list_push(&ratios, base_ratio);
     }
 
+    hash_size = hash_table_size_for_count(ratios.size,
+                                          "minimum-count candidate hash index");
+    candidate_hash_indices = checked_malloc((size_t)hash_size * sizeof(int));
+    for (ratio_index = 0; ratio_index < hash_size; ratio_index++) {
+        candidate_hash_indices[ratio_index] = -1;
+    }
+
     for (ratio_index = 0; ratio_index < ratios.size; ratio_index++) {
         int duplicate_index = -1;
-        int existing_index;
+        unsigned long long vector_hash;
+        int slot_index;
         int *minimum_counts =
             checked_calloc((size_t)problem_data->lab_count, sizeof(int));
         MinimumCountCandidate candidate;
@@ -5675,13 +5734,21 @@ static MinimumCountCandidateList build_minimum_count_candidates(
             continue;
         }
 
-        for (existing_index = 0; existing_index < candidates.size; existing_index++) {
+        vector_hash = minimum_count_vector_hash(minimum_counts,
+                                                problem_data->lab_count);
+        slot_index = (int)(vector_hash & (unsigned long long)(hash_size - 1));
+        for (;;) {
+            int existing_index = candidate_hash_indices[slot_index];
+            if (existing_index < 0) {
+                break;
+            }
             if (minimum_count_vectors_equal(candidates.items[existing_index].minimum_counts,
                                             minimum_counts,
                                             problem_data->lab_count)) {
                 duplicate_index = existing_index;
                 break;
             }
+            slot_index = (slot_index + 1) & (hash_size - 1);
         }
 
         if (duplicate_index >= 0) {
@@ -5697,8 +5764,10 @@ static MinimumCountCandidateList build_minimum_count_candidates(
         candidate.minimum_counts = minimum_counts;
         candidate.minimum_count_sum = sum_minimum_counts(problem_data, minimum_counts);
         minimum_count_candidate_list_push(&candidates, candidate);
+        candidate_hash_indices[slot_index] = candidates.size - 1;
     }
 
+    free(candidate_hash_indices);
     free(ratios.items);
     if (candidates.size == 0) {
         fail_with_context("weighted exact objective", "no feasible fill threshold exists");
@@ -8343,16 +8412,81 @@ static void replace_output_file(const char *temporary_path,
 #endif
 }
 
+static int same_existing_file(const char *left_path, const char *right_path)
+{
+#ifdef _WIN32
+    HANDLE left_handle;
+    HANDLE right_handle;
+    BY_HANDLE_FILE_INFORMATION left_info;
+    BY_HANDLE_FILE_INFORMATION right_info;
+    int same_file;
+
+    left_handle = CreateFileA(left_path,
+                              0,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              NULL,
+                              OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL,
+                              NULL);
+    if (left_handle == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    right_handle = CreateFileA(right_path,
+                               0,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL,
+                               NULL);
+    if (right_handle == INVALID_HANDLE_VALUE) {
+        CloseHandle(left_handle);
+        return 0;
+    }
+    if (!GetFileInformationByHandle(left_handle, &left_info) ||
+        !GetFileInformationByHandle(right_handle, &right_info)) {
+        CloseHandle(right_handle);
+        CloseHandle(left_handle);
+        return 0;
+    }
+    same_file =
+        left_info.dwVolumeSerialNumber == right_info.dwVolumeSerialNumber &&
+        left_info.nFileIndexHigh == right_info.nFileIndexHigh &&
+        left_info.nFileIndexLow == right_info.nFileIndexLow;
+    CloseHandle(right_handle);
+    CloseHandle(left_handle);
+    return same_file;
+#else
+    struct stat left_stat;
+    struct stat right_stat;
+
+    if (stat(left_path, &left_stat) != 0) {
+        return 0;
+    }
+    if (stat(right_path, &right_stat) != 0) {
+        return 0;
+    }
+    return left_stat.st_dev == right_stat.st_dev &&
+           left_stat.st_ino == right_stat.st_ino;
+#endif
+}
+
+static int path_matches_existing_input_file(const char *candidate_path,
+                                            const char *input_path)
+{
+    return strcmp(candidate_path, input_path) == 0 ||
+           same_existing_file(candidate_path, input_path);
+}
+
 static void reject_path_equal_to_input_path(const char *context,
                                             const char *lab_file_path,
                                             const char *preference_file_path,
                                             const char *candidate_path)
 {
-    if (strcmp(candidate_path, lab_file_path) == 0) {
+    if (path_matches_existing_input_file(candidate_path, lab_file_path)) {
         fail_with_context(context,
                           "output/report path must be different from lab input file path");
     }
-    if (strcmp(candidate_path, preference_file_path) == 0) {
+    if (path_matches_existing_input_file(candidate_path, preference_file_path)) {
         fail_with_context(
             context,
             "output/report path must be different from preference input file path");
@@ -8364,7 +8498,7 @@ static void reject_path_equal_to_optional_input_path(const char *context,
                                                      const char *candidate_path)
 {
     if (optional_input_path != NULL &&
-        strcmp(candidate_path, optional_input_path) == 0) {
+        path_matches_existing_input_file(candidate_path, optional_input_path)) {
         fail_with_context(context,
                           "output/report path must be different from rank cost input file path");
     }
@@ -8377,7 +8511,7 @@ static void reject_path_equal_to_named_optional_input_path(
     const char *input_description)
 {
     if (optional_input_path != NULL &&
-        strcmp(candidate_path, optional_input_path) == 0) {
+        path_matches_existing_input_file(candidate_path, optional_input_path)) {
         fail_with_context_format(context,
                                  "output/report path must be different from %s",
                                  input_description);

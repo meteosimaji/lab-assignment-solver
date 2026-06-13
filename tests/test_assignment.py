@@ -909,6 +909,34 @@ A 1
     assert lab_path.read_text(encoding="utf-8") == lab_text
 
 
+def test_output_path_same_input_file_with_different_spelling_is_rejected(tmp_path):
+    lab_text = """\
+2
+A 1
+B 1
+"""
+    preference_text = """\
+2 1
+00001 A
+00002 B
+"""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    write_text(tmp_path / "labs.txt", lab_text)
+    write_text(tmp_path / "preferences.txt", preference_text)
+
+    completed = subprocess.run(
+        [str(BINARY), "labs.txt", "preferences.txt", "./labs.txt"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode != 0
+    assert "output/report path must be different from lab input file path" in completed.stderr
+    assert (tmp_path / "labs.txt").read_text(encoding="utf-8") == lab_text
+
+
 def test_report_sidecar_path_equal_to_input_path_is_rejected_without_overwriting_input(tmp_path):
     lab_text = """\
 1
@@ -944,6 +972,43 @@ A 1
     assert "output/report path must be different from lab input file path" in completed.stderr
     assert lab_path.read_text(encoding="utf-8") == lab_text
     assert not output_path.exists()
+
+
+def test_report_sidecar_same_input_file_with_different_spelling_is_rejected(tmp_path):
+    lab_text = """\
+1
+A 1
+"""
+    preference_text = """\
+1 1
+00001 A
+"""
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    output_path_text = str(tmp_path) + "/./out.txt"
+    lab_path = metrics_path_for(tmp_path / "out.txt")
+    preference_path = tmp_path / "preferences.txt"
+    write_text(lab_path, lab_text)
+    write_text(preference_path, preference_text)
+
+    completed = subprocess.run(
+        [
+            str(BINARY),
+            str(lab_path),
+            str(preference_path),
+            output_path_text,
+            "--reports",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode != 0
+    assert "metrics output path" in completed.stderr
+    assert "output/report path must be different from lab input file path" in completed.stderr
+    assert lab_path.read_text(encoding="utf-8") == lab_text
+    assert not Path(str(tmp_path / "out.txt")).exists()
 
 
 def test_invalid_input_with_reports_does_not_delete_existing_sidecars(tmp_path):

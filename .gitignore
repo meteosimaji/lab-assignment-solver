@@ -7,6 +7,7 @@ __MACOSX/
 __pycache__/
 tmp/
 submit.zip
+lab-assignment-solver-source.zip
 assignment.plist
 /202*.pdf
 docs/*.pdf

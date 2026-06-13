@@ -57,6 +57,15 @@ make CFLAGS='-std=c11 -O2 -Wall -Wextra -Wshadow -Wconversion -pedantic -Werror'
 python3 -m pytest -q
 ```
 
+To create a public source archive, use Git-tracked files only:
+
+```sh
+make source-archive
+```
+
+This uses `git archive` and does not include local build products, `.git/`,
+working `tmp/` files, submission zips, or private course PDFs.
+
 ## Run
 
 ```sh

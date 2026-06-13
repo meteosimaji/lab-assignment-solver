@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Wshadow -Wconversion -pedantic
 TARGET := assign_labs
 
-.PHONY: all clean test strict asan test-asan stress benchmark
+.PHONY: all clean test strict asan test-asan stress benchmark source-archive
 
 all: $(TARGET)
 
@@ -48,6 +48,9 @@ benchmark: $(TARGET)
 	  --bench-dir tmp/bench_final \
 	  --output docs/benchmark_results.tsv \
 	  --repeat 1
+
+source-archive:
+	sh scripts/package_source_archive.sh
 
 clean:
 	rm -f $(TARGET) $(TARGET).exe
