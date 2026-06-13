@@ -16,6 +16,17 @@ safety conditions are not met.
   matrix.
 - Rank-target threshold checks reuse a rank-indexed student-group cache instead
   of rebuilding the same active-rank grouping for every repeated check.
+- Fair objective with an average-rank or rank-sum hard target uses binary search
+  over rank-threshold candidates.  The predicate is monotone: if the target is
+  achievable with `max_rank <= q`, it remains achievable for every larger
+  threshold.
+- Rank-first objectives reject impossible rank-sum hard targets immediately
+  after the rank-optimal base solve, before running fill tie-break searches.
+- Minimum-fill hard targets prune generated fill-ratio candidates below the
+  required lower bound.  All lower ratios map to the same target-clamped
+  minimum-count vector, so this preserves the feasible-region search exactly.
+- Structural hard targets are prechecked with the existing lower-bound
+  feasibility flow before expensive objective-specific solves.
 - Weighted-exact branch-and-bound splits boxes by weighted objective spread
   (`max_rank` spread versus `minimum_fill` spread) before falling back to index
   width.  This changes only search order, not the lower-bound proof.

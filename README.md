@@ -349,15 +349,31 @@ Supported hard targets:
 --require-rank-sum-at-most N
 --require-max-rank-at-most K
 --require-minimum-fill-at-least X
+--require-no-outside
 --require-outside-at-most 0
 --targets FILE
+```
+
+Reserved hard targets that are parsed and rejected until an exact
+resource-constrained engine is available:
+
+```text
+--require-average-fill-at-least X
+--require-rank-square-at-most N
+--require-outside-at-most N   # N > 0
 ```
 
 `X` can be an integer, decimal, fraction such as `1/4`, or percentage such as
 `25%`.  Structural targets such as maximum rank, minimum fill, and
 outside-at-most-zero are enforced directly by the flow model.  Average-rank and
 rank-sum hard targets are exact for `rubric`, `balanced`, `guarded`, and `fair`.
-Unsupported combinations are rejected instead of silently becoming heuristics.
+`minimum_fill_rate` is supported because it becomes per-laboratory lower
+bounds.  `average_fill_rate` hard targets are intentionally not enabled for
+arbitrary objectives yet because they are global rational side constraints.
+Likewise, rank-square, outside-count above zero, and changed-student-count hard
+targets are rejected until an exact resource-constrained engine is enabled for
+them.  Unsupported combinations are rejected instead of silently becoming
+heuristics.
 
 The default objective is `rubric`, aligned with common evaluation metrics:
 

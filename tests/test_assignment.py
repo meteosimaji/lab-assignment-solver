@@ -2221,6 +2221,31 @@ B 1
     assert not output_path.exists()
 
 
+def test_require_average_fill_hard_target_is_rejected_until_exact_engine(tmp_path):
+    lab_text = """\
+2
+A 1
+B 1
+"""
+    preference_text = """\
+2 2
+00001 A B
+00002 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--require-average-fill-at-least",
+            "50%",
+        ],
+    )
+    assert completed.returncode != 0
+    assert "average_fill_rate hard targets are not supported yet" in completed.stderr
+    assert not output_path.exists()
+
+
 def test_targets_file_minimum_fill_and_outside_report(tmp_path):
     lab_text = """\
 2
@@ -2303,6 +2328,43 @@ B 3
     }
     assert Path(str(output_path) + ".portfolio.tsv").exists()
     assert not Path(str(output_path) + ".rubric.txt").exists()
+
+
+def test_require_no_outside_alias(tmp_path):
+    lab_text = """\
+2
+A 2
+B 2
+"""
+    preference_text = """\
+3 2
+00001 A B
+00002 A B
+00003 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "fair",
+            "--require-no-outside",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert rows == [
+        {
+            "target": "outside_preference_count",
+            "operator": "<=",
+            "required": "0",
+            "actual": "0",
+            "status": "pass",
+            "margin": "0",
+        }
+    ]
 
 
 def test_portfolio_summary_only_removes_candidate_outputs(tmp_path):

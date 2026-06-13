@@ -567,6 +567,7 @@ static int target_rank_upper_bound(const ProblemData *problem_data,
                                    int base_upper_bound);
 static int target_minimum_count_for_lab(const ProblemData *problem_data,
                                         int lab_index);
+static int *build_base_minimum_counts(const ProblemData *problem_data);
 static int ratio_compare_value(RatioValue left, RatioValue right);
 static int ceil_ratio_times_capacity(RatioValue ratio,
                                      long long capacity_value,
@@ -1564,9 +1565,11 @@ static void print_help(const char *program_name)
     printf("  --targets FILE           hard target constraint file\n");
     printf("  --require-average-rank-at-most X  require average assigned rank <= X\n");
     printf("  --require-rank-sum-at-most N      require rank_sum <= N\n");
-    printf("  --require-rank-square-at-most N   require rank_square_sum <= N\n");
+    printf("  --require-rank-square-at-most N   reserved; parsed but not yet exact\n");
     printf("  --require-max-rank-at-most K      require max assigned rank <= K\n");
     printf("  --require-minimum-fill-at-least X require minimum fill rate >= X or percent\n");
+    printf("  --require-average-fill-at-least X reserved; global resource target not yet exact\n");
+    printf("  --require-no-outside             require no outside-preference assignment\n");
     printf("  --require-outside-at-most N       require outside-preference count <= N (exactly supports 0)\n");
     printf("  --first-choice-gap N     satisfaction cost for rank 2, default 100\n");
     printf("  --rank-tail-linear N     linear tail cost after rank 2, default 30\n");
@@ -3382,6 +3385,8 @@ static IntList build_rank_threshold_candidates(const ProblemData *problem_data)
 {
     IntList candidates;
     int outside_rank = problem_data->lab_count + 1;
+    int candidate_upper_bound =
+        target_rank_upper_bound(problem_data, outside_rank);
     int rank_value;
 
     if (active_profile != NULL) {
@@ -3391,11 +3396,14 @@ static IntList build_rank_threshold_candidates(const ProblemData *problem_data)
 
     for (rank_value = 1;
          rank_value <= problem_data->max_preferences &&
+         rank_value <= candidate_upper_bound &&
          rank_value < outside_rank;
          rank_value++) {
         int_list_push(&candidates, rank_value);
     }
-    int_list_push(&candidates, outside_rank);
+    if (outside_rank <= candidate_upper_bound) {
+        int_list_push(&candidates, outside_rank);
+    }
 
     return candidates;
 }
@@ -3621,6 +3629,43 @@ static int has_feasible_assignment_with_minimum_counts(const ProblemData *proble
 static int has_feasible_assignment(const ProblemData *problem_data, int max_rank)
 {
     return has_feasible_assignment_with_minimum_counts(problem_data, max_rank, NULL);
+}
+
+static int target_constraints_have_structural_bound(
+    const TargetConstraints *targets)
+{
+    return targets != NULL &&
+           (targets->has_max_rank_max ||
+            targets->has_minimum_fill_min ||
+            targets->has_outside_max);
+}
+
+static void precheck_structural_target_constraints(
+    const ProblemData *problem_data)
+{
+    int q_upper_bound;
+    int *minimum_counts;
+    int feasible;
+    if (!target_constraints_have_structural_bound(problem_data->targets)) {
+        return;
+    }
+
+    q_upper_bound = target_rank_upper_bound(problem_data,
+                                           problem_data->lab_count + 1);
+    if (q_upper_bound < 1) {
+        fail_with_context("target constraints",
+                          "No feasible solution: structural hard targets leave no allowable rank");
+    }
+
+    minimum_counts = build_base_minimum_counts(problem_data);
+    feasible = has_feasible_assignment_with_minimum_counts(problem_data,
+                                                           q_upper_bound,
+                                                           minimum_counts);
+    free(minimum_counts);
+    if (!feasible) {
+        fail_with_context("target constraints",
+                          "No feasible solution: no assignment satisfies the structural hard targets");
+    }
 }
 
 static int find_minimum_feasible_max_rank_at_most(const ProblemData *problem_data,
@@ -5848,11 +5893,22 @@ static int ratio_qsort_compare(const void *left_pointer, const void *right_point
 
 static RatioList build_ratio_candidates(const ProblemData *problem_data)
 {
+    const TargetConstraints *targets = problem_data->targets;
+    RatioValue lower_bound;
+    int has_lower_bound = 0;
     int lab_index;
     RatioList list;
     list.items = NULL;
     list.size = 0;
     list.capacity = 0;
+
+    lower_bound.numerator = 0LL;
+    lower_bound.denominator = 1LL;
+    if (targets != NULL && targets->has_minimum_fill_min) {
+        lower_bound = targets->minimum_fill_min;
+        has_lower_bound = 1;
+        ratio_list_push(&list, lower_bound);
+    }
 
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         int count_value;
@@ -5865,6 +5921,10 @@ static RatioList build_ratio_candidates(const ProblemData *problem_data)
             RatioValue ratio;
             ratio.numerator = (long long)count_value;
             ratio.denominator = capacity_value;
+            if (has_lower_bound &&
+                ratio_compare_value(ratio, lower_bound) < 0) {
+                continue;
+            }
             ratio_list_push(&list, ratio);
         }
     }
@@ -7231,6 +7291,18 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
                           "No feasible solution: no feasible assignment satisfies the rank/fill targets");
     }
     base_solution = optional_base_solution.solution;
+    if (rank_cost_model == NULL) {
+        long long rank_sum_limit;
+        if (target_rank_sum_limit(problem_data, &rank_sum_limit) &&
+            base_solution.total_cost.second > rank_sum_limit) {
+            free_solution_result(&base_solution);
+            free_student_groups(&active_groups);
+            free(base_minimum_counts);
+            fail_with_context(
+                "target constraints",
+                "No feasible solution: no feasible assignment satisfies the average-rank/rank-sum target");
+        }
+    }
     base_solution_max_rank = max_rank_for_solution(problem_data, base_solution.assignment);
     if (base_solution_max_rank < (long long)q_upper_bound) {
         q_upper_bound = (int)base_solution_max_rank;
@@ -7298,6 +7370,40 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
     return assignment;
 }
 
+static int rank_sum_target_is_feasible_at_q(const ProblemData *problem_data,
+                                            const IntList *candidates,
+                                            int q_index,
+                                            const int *base_minimum_counts,
+                                            int required_count,
+                                            long long rank_sum_limit,
+                                            StudentGroupCache *group_cache)
+{
+    int q_limit = candidates->items[q_index];
+    const StudentGroups *active_group_pointer =
+        student_group_cache_get(group_cache,
+                                problem_data,
+                                candidates,
+                                q_index);
+    OptionalSolutionResult candidate_solution =
+        try_solve_with_minimum_counts(problem_data,
+                                      q_limit,
+                                      base_minimum_counts,
+                                      0,
+                                      0,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      active_group_pointer);
+    int feasible =
+        candidate_solution.feasible &&
+        candidate_solution.solution.total_cost.first == -(long long)required_count &&
+        candidate_solution.solution.total_cost.second <= rank_sum_limit;
+    free_solution_result(&candidate_solution.solution);
+    return feasible;
+}
+
 static int find_fair_max_rank_satisfying_rank_sum_targets(
     const ProblemData *problem_data)
 {
@@ -7307,7 +7413,9 @@ static int find_fair_max_rank_satisfying_rank_sum_targets(
     int q_upper_bound;
     int first_q_index;
     int last_q_index;
-    int q_index;
+    int low_index;
+    int high_index;
+    int answer_index;
     int *base_minimum_counts;
     int required_count;
 
@@ -7335,44 +7443,47 @@ static int find_fair_max_rank_satisfying_rank_sum_targets(
     group_cache =
         student_group_cache_create(candidates.size, STUDENT_GROUP_ACTIVE_RANK);
 
-    for (q_index = first_q_index; q_index <= last_q_index; q_index++) {
-        int q_limit = candidates.items[q_index];
-        const StudentGroups *active_group_pointer =
-            student_group_cache_get(&group_cache,
-                                    problem_data,
-                                    &candidates,
-                                    q_index);
-        OptionalSolutionResult candidate_solution =
-            try_solve_with_minimum_counts(problem_data,
-                                          q_limit,
+    if (!rank_sum_target_is_feasible_at_q(problem_data,
+                                          &candidates,
+                                          last_q_index,
                                           base_minimum_counts,
-                                          0,
-                                          0,
-                                          NULL,
-                                          NULL,
-                                          NULL,
-                                          NULL,
-                                          NULL,
-                                          active_group_pointer);
-        int target_satisfied =
-            candidate_solution.feasible &&
-            candidate_solution.solution.total_cost.first == -(long long)required_count &&
-            candidate_solution.solution.total_cost.second <= rank_sum_limit;
-        free_solution_result(&candidate_solution.solution);
-        if (target_satisfied) {
-            student_group_cache_free(&group_cache);
-            free(base_minimum_counts);
-            int_list_free(&candidates);
-            return q_limit;
+                                          required_count,
+                                          rank_sum_limit,
+                                          &group_cache)) {
+        student_group_cache_free(&group_cache);
+        free(base_minimum_counts);
+        int_list_free(&candidates);
+        fail_with_context(
+            "target constraints",
+            "No feasible solution: no feasible assignment satisfies the average-rank/rank-sum target");
+    }
+
+    low_index = first_q_index;
+    high_index = last_q_index;
+    answer_index = last_q_index;
+    while (low_index <= high_index) {
+        int middle_index = low_index + (high_index - low_index) / 2;
+        if (rank_sum_target_is_feasible_at_q(problem_data,
+                                             &candidates,
+                                             middle_index,
+                                             base_minimum_counts,
+                                             required_count,
+                                             rank_sum_limit,
+                                             &group_cache)) {
+            answer_index = middle_index;
+            high_index = middle_index - 1;
+        } else {
+            low_index = middle_index + 1;
         }
     }
 
     student_group_cache_free(&group_cache);
     free(base_minimum_counts);
-    int_list_free(&candidates);
-    fail_with_context("target constraints",
-                      "No feasible solution: no feasible assignment satisfies the average-rank/rank-sum target");
-    return 0;
+    {
+        int answer_rank = candidates.items[answer_index];
+        int_list_free(&candidates);
+        return answer_rank;
+    }
 }
 
 static long long max_rank_for_solution(const ProblemData *problem_data,
@@ -12213,6 +12324,13 @@ static ProgramOptions parse_program_options(int argc, char **argv)
                                                        &argument_index,
                                                        argument),
                                   argument));
+        } else if (strcmp(argument, "--require-average-fill-at-least") == 0) {
+            (void)require_option_value(argc, argv, &argument_index, argument);
+            fail_with_context(
+                "target constraints",
+                "average_fill_rate hard targets are not supported yet; use minimum_fill_rate or a report-only comparison");
+        } else if (strcmp(argument, "--require-no-outside") == 0) {
+            target_constraints_set_outside_max(&options.targets, 0);
         } else if (strcmp(argument, "--require-outside-at-most") == 0) {
             target_constraints_set_outside_max(
                 &options.targets,
@@ -12461,6 +12579,7 @@ int main(int argc, char **argv)
     }
     finalize_problem_capacities(&problem_data);
     validate_target_constraints_against_problem(&problem_data);
+    precheck_structural_target_constraints(&problem_data);
     if (options.base_assignment_path != NULL) {
         base_assignment =
             read_assignment_file_as_base(options.base_assignment_path, &problem_data);
