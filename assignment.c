@@ -8,6 +8,7 @@
 #include <time.h>
 
 #ifdef _WIN32
+#include <io.h>
 #include <windows.h>
 #else
 #include <sys/wait.h>
@@ -30,9 +31,17 @@
 #define WEIGHTED_SEED_MIN_GRID_SIZE 128LL
 #define LIGHT_PORTFOLIO_CANDIDATE_COUNT 5
 #define MAX_PORTFOLIO_CANDIDATES 8
+#define AUTO_STUDENT_ID_WIDTH -1
 
 typedef struct ConstraintSet ConstraintSet;
 typedef struct RankCostModel RankCostModel;
+
+typedef enum {
+    ID_POLICY_ASSIGNMENT5,
+    ID_POLICY_NUMERIC,
+    ID_POLICY_TOKEN,
+    ID_POLICY_AUTO
+} StudentIdPolicy;
 
 typedef struct {
     char *name;
@@ -41,6 +50,8 @@ typedef struct {
 } LabInfo;
 
 typedef struct {
+    char *raw_id;
+    char *canonical_id;
     char *student_id;
 } StudentInfo;
 
@@ -53,6 +64,10 @@ typedef struct {
     int *rank_by_student_lab;
     int lab_hash_size;
     int *lab_hash_indices;
+    int student_hash_size;
+    int *student_hash_indices;
+    StudentIdPolicy id_policy;
+    int student_id_width;
     const ConstraintSet *constraints;
     const int *base_assignment;
     const RankCostModel *rank_cost_model;
@@ -312,6 +327,10 @@ typedef struct {
     int portfolio_mode; /* 0: off, 1: light, 2: deep */
     int keep_candidate_files;
     int quiet;
+    StudentIdPolicy id_policy;
+    int student_id_width;
+    int interactive;
+    int assume_yes;
     int jobs;
     ObjectiveMode objective_mode;
     int max_rank_slack;
@@ -1467,6 +1486,11 @@ static void print_help(const char *program_name)
     printf("  --portfolio-summary-only  keep only final output and portfolio summary files\n");
     printf("  --keep-candidate-files    keep per-candidate portfolio assignment files\n");
     printf("  --jobs N          run portfolio candidates in parallel processes when available\n");
+    printf("  --id-policy MODE  student id policy: auto, assignment5, numeric, or token\n");
+    printf("  --student-id-width N|auto  zero-padding width for numeric ids, default auto\n");
+    printf("  --interactive     allow guided y/N confirmation for --id-policy auto\n");
+    printf("  --no-interactive  never prompt; require explicit id policy when ambiguous\n");
+    printf("  --assume-yes      accept --id-policy auto detection without prompting\n");
     printf("  --objective MODE  objective mode: rubric, satisfaction, fair, balanced, guarded, fill-convex, or weighted-exact\n");
     printf("  --max-rank-slack N       guarded mode rank slack from minimum feasible max-rank\n");
     printf("  --rank-costs FILE        rank cost table for satisfaction mode\n");
@@ -1777,22 +1801,166 @@ static int parse_int_range(const char *text,
     return (int)parsed_value;
 }
 
-static void validate_student_id_token(const char *student_id, const char *context)
+static int text_is_digits(const char *text)
 {
-    size_t length = strlen(student_id);
     size_t position;
-    long long numeric_value;
-
-    if (length == 0U || length > 5U) {
-        fail_with_context(context, "student id must contain 1 to 5 digits");
+    if (text[0] == '\0') {
+        return 0;
     }
-    for (position = 0U; position < length; position++) {
-        if (!isdigit((unsigned char)student_id[position])) {
-            fail_with_context(context, "student id must contain only digits");
+    for (position = 0U; text[position] != '\0'; position++) {
+        if (!isdigit((unsigned char)text[position])) {
+            return 0;
         }
     }
-    numeric_value = parse_long_long_range(student_id, 1LL, 99999LL, context);
-    (void)numeric_value;
+    return 1;
+}
+
+static int student_id_token_is_assignment5(const char *student_id)
+{
+    size_t length = strlen(student_id);
+    if (length == 0U || length > 5U) {
+        return 0;
+    }
+    if (!text_is_digits(student_id)) {
+        return 0;
+    }
+    errno = 0;
+    {
+        char *end_pointer = NULL;
+        long long numeric_value = strtoll(student_id, &end_pointer, 10);
+        return errno == 0 &&
+               end_pointer != student_id &&
+               *end_pointer == '\0' &&
+               numeric_value >= 1LL &&
+               numeric_value <= 99999LL;
+    }
+}
+
+static int student_id_token_is_zero_padded_assignment5(const char *student_id)
+{
+    return strlen(student_id) == 5U &&
+           student_id_token_is_assignment5(student_id);
+}
+
+static long long parse_student_numeric_id_value(const char *student_id,
+                                                const char *context)
+{
+    if (!text_is_digits(student_id)) {
+        fail_with_context(context, "student id must contain only digits");
+    }
+    return parse_long_long_range(student_id, 1LL, LLONG_MAX / 4LL, context);
+}
+
+static char *canonical_numeric_student_id(const char *student_id,
+                                          const char *context)
+{
+    char buffer[64];
+    long long numeric_value =
+        parse_student_numeric_id_value(student_id, context);
+    int written = snprintf(buffer, sizeof(buffer), "%lld", numeric_value);
+    if (written < 0 || (size_t)written >= sizeof(buffer)) {
+        fail_with_context(context, "student id is too large");
+    }
+    return duplicate_text(buffer);
+}
+
+static char *display_numeric_student_id(const char *canonical_id,
+                                        int display_width,
+                                        const char *context)
+{
+    size_t canonical_length = strlen(canonical_id);
+    size_t width = display_width > 0 ? (size_t)display_width : canonical_length;
+    char *display_id;
+    if (width < canonical_length) {
+        width = canonical_length;
+    }
+    display_id = checked_malloc(width + 1U);
+    if (width > canonical_length) {
+        memset(display_id, '0', width - canonical_length);
+    }
+    memcpy(display_id + (width - canonical_length),
+           canonical_id,
+           canonical_length + 1U);
+    (void)context;
+    return display_id;
+}
+
+static int stdin_is_terminal(void)
+{
+#ifdef _WIN32
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
+}
+
+static int confirm_auto_student_id_policy(const char *mode_text,
+                                          char **examples,
+                                          int example_count)
+{
+    char answer[32];
+    int example_index;
+    fprintf(stderr,
+            "warning: student identifiers need normalization or a non-default policy.\n\n");
+    fprintf(stderr, "Examples:\n");
+    for (example_index = 0; example_index < example_count; example_index++) {
+        fprintf(stderr, "  %s\n", examples[example_index]);
+    }
+    fprintf(stderr,
+            "\nOriginal assignment format outputs numeric IDs as 00001..99999.\n");
+    fprintf(stderr,
+            "Treat the first column as %s student identifiers instead? [y/N]: ",
+            mode_text);
+    fflush(stderr);
+    if (fgets(answer, sizeof(answer), stdin) == NULL) {
+        return 0;
+    }
+    return answer[0] == 'y' || answer[0] == 'Y';
+}
+
+static const char *student_id_policy_name(StudentIdPolicy policy)
+{
+    switch (policy) {
+    case ID_POLICY_ASSIGNMENT5:
+        return "assignment5";
+    case ID_POLICY_NUMERIC:
+        return "numeric";
+    case ID_POLICY_TOKEN:
+        return "token";
+    case ID_POLICY_AUTO:
+        return "auto";
+    }
+    return "assignment5";
+}
+
+static StudentIdPolicy parse_student_id_policy(const char *text)
+{
+    if (strcmp(text, "assignment5") == 0) {
+        return ID_POLICY_ASSIGNMENT5;
+    }
+    if (strcmp(text, "numeric") == 0) {
+        return ID_POLICY_NUMERIC;
+    }
+    if (strcmp(text, "token") == 0) {
+        return ID_POLICY_TOKEN;
+    }
+    if (strcmp(text, "auto") == 0) {
+        return ID_POLICY_AUTO;
+    }
+    fail_with_context_format_hint(
+        "--id-policy",
+        "use assignment5, numeric, token, or auto",
+        "unknown id policy '%s'",
+        text);
+    return ID_POLICY_ASSIGNMENT5;
+}
+
+static int parse_student_id_width(const char *text)
+{
+    if (strcmp(text, "auto") == 0) {
+        return AUTO_STUDENT_ID_WIDTH;
+    }
+    return parse_int_range(text, 1, 64, "--student-id-width");
 }
 
 static unsigned long long hash_text_bytes(const char *text)
@@ -1870,16 +2038,58 @@ static int find_lab_index(const ProblemData *problem_data, const char *lab_name)
     return -1;
 }
 
-static int find_student_index(const ProblemData *problem_data, const char *student_id)
+static char *canonical_student_id_for_policy(StudentIdPolicy policy,
+                                             const char *student_id,
+                                             const char *context)
 {
+    if (policy == ID_POLICY_TOKEN) {
+        if (student_id[0] == '\0') {
+            fail_with_context(context, "student id must not be empty");
+        }
+        return duplicate_text(student_id);
+    }
+    if (policy == ID_POLICY_ASSIGNMENT5 && !student_id_token_is_assignment5(student_id)) {
+        fail_with_context(context, "student id must be a natural number in 1..99999");
+    }
+    return canonical_numeric_student_id(student_id, context);
+}
+
+static int find_student_index(const ProblemData *problem_data,
+                              const char *student_id,
+                              const char *context)
+{
+    char *canonical_id =
+        canonical_student_id_for_policy(problem_data->id_policy, student_id, context);
     int student_index;
+    if (problem_data->student_hash_indices != NULL &&
+        problem_data->student_hash_size > 0) {
+        int slot_index =
+            (int)(hash_text_bytes(canonical_id) &
+                  (unsigned long long)(problem_data->student_hash_size - 1));
+        for (;;) {
+            student_index = problem_data->student_hash_indices[slot_index];
+            if (student_index < 0) {
+                free(canonical_id);
+                return -1;
+            }
+            if (strcmp(problem_data->students[student_index].canonical_id,
+                       canonical_id) == 0) {
+                free(canonical_id);
+                return student_index;
+            }
+            slot_index = (slot_index + 1) &
+                         (problem_data->student_hash_size - 1);
+        }
+    }
     for (student_index = 0;
          student_index < problem_data->student_count;
          student_index++) {
-        if (strcmp(problem_data->students[student_index].student_id, student_id) == 0) {
+        if (strcmp(problem_data->students[student_index].canonical_id, canonical_id) == 0) {
+            free(canonical_id);
             return student_index;
         }
     }
+    free(canonical_id);
     return -1;
 }
 
@@ -1904,20 +2114,12 @@ static StudentHashIndex student_hash_index_create(int student_count)
     return index;
 }
 
-static void student_hash_index_free(StudentHashIndex *index)
-{
-    free(index->indices);
-    index->indices = NULL;
-    index->hash_size = 0;
-}
-
 static int student_id_already_seen_or_insert(StudentHashIndex *index,
                                              const ProblemData *problem_data,
-                                             const char *student_id,
                                              int student_index)
 {
     int slot_index =
-        (int)(hash_text_bytes(student_id) &
+        (int)(hash_text_bytes(problem_data->students[student_index].canonical_id) &
               (unsigned long long)(index->hash_size - 1));
 
     for (;;) {
@@ -1926,12 +2128,183 @@ static int student_id_already_seen_or_insert(StudentHashIndex *index,
             index->indices[slot_index] = student_index;
             return 0;
         }
-        if (strcmp(problem_data->students[existing_index].student_id,
-                   student_id) == 0) {
+        if (strcmp(problem_data->students[existing_index].canonical_id,
+                   problem_data->students[student_index].canonical_id) == 0) {
             return 1;
         }
         slot_index = (slot_index + 1) & (index->hash_size - 1);
     }
+}
+
+static void build_student_hash_index(ProblemData *problem_data)
+{
+    StudentHashIndex index = student_hash_index_create(problem_data->student_count);
+    int student_index;
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        if (student_id_already_seen_or_insert(&index, problem_data, student_index)) {
+            fail_with_context_format_hint("preference file",
+                                          "student identifiers are compared after normalization",
+                                          "duplicate student id '%s'",
+                                          problem_data->students[student_index].raw_id);
+        }
+    }
+    problem_data->student_hash_size = index.hash_size;
+    problem_data->student_hash_indices = index.indices;
+}
+
+static void remember_student_id_example(char **examples,
+                                        int *example_count,
+                                        const char *student_id)
+{
+    int example_index;
+    for (example_index = 0; example_index < *example_count; example_index++) {
+        if (strcmp(examples[example_index], student_id) == 0) {
+            return;
+        }
+    }
+    if (*example_count < 3) {
+        examples[*example_count] = (char *)student_id;
+        (*example_count)++;
+    }
+}
+
+static StudentIdPolicy effective_student_id_policy(
+    const ProblemData *problem_data,
+    StudentIdPolicy requested_policy,
+    int interactive,
+    int assume_yes)
+{
+    int student_index;
+    int all_assignment5 = 1;
+    int all_zero_padded_assignment5 = 1;
+    int all_numeric = 1;
+    char *examples[3] = {NULL, NULL, NULL};
+    int example_count = 0;
+
+    if (requested_policy != ID_POLICY_AUTO) {
+        return requested_policy;
+    }
+
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        const char *raw_id = problem_data->students[student_index].raw_id;
+        if (!student_id_token_is_assignment5(raw_id)) {
+            all_assignment5 = 0;
+            remember_student_id_example(examples, &example_count, raw_id);
+        }
+        if (!student_id_token_is_zero_padded_assignment5(raw_id)) {
+            all_zero_padded_assignment5 = 0;
+            remember_student_id_example(examples, &example_count, raw_id);
+        }
+        if (!text_is_digits(raw_id)) {
+            all_numeric = 0;
+        }
+    }
+
+    if (all_assignment5 && all_zero_padded_assignment5) {
+        return ID_POLICY_ASSIGNMENT5;
+    }
+
+    if (assume_yes) {
+        return all_assignment5 ? ID_POLICY_ASSIGNMENT5 :
+               (all_numeric ? ID_POLICY_NUMERIC : ID_POLICY_TOKEN);
+    }
+
+    if (interactive) {
+        const char *mode_text =
+            all_assignment5 ? "zero-padded assignment-style" :
+            (all_numeric ? "normalized numeric" : "opaque token");
+        if (!stdin_is_terminal()) {
+            fail_with_context_format_hint(
+                "--id-policy auto",
+                "rerun with --id-policy assignment5, --id-policy numeric, --id-policy token, or --id-policy auto --assume-yes",
+                "cannot ask for confirmation because stdin is not a terminal");
+        }
+        if (confirm_auto_student_id_policy(mode_text, examples, example_count)) {
+            return all_assignment5 ? ID_POLICY_ASSIGNMENT5 :
+                   (all_numeric ? ID_POLICY_NUMERIC : ID_POLICY_TOKEN);
+        }
+        fail_with_context("--id-policy auto", "student identifier policy was not confirmed");
+    }
+
+    fail_with_context_format_hint(
+        "--id-policy auto",
+        "rerun with --id-policy assignment5, --id-policy numeric, --id-policy token, --id-policy auto --assume-yes, or --interactive",
+        "student identifiers require confirmation or an explicit policy");
+    return ID_POLICY_ASSIGNMENT5;
+}
+
+static int auto_numeric_student_id_width(const ProblemData *problem_data,
+                                         int explicit_width)
+{
+    int width = explicit_width == AUTO_STUDENT_ID_WIDTH ? 5 : explicit_width;
+    int student_index;
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        size_t raw_length = strlen(problem_data->students[student_index].raw_id);
+        size_t canonical_length =
+            strlen(problem_data->students[student_index].canonical_id);
+        if (raw_length > (size_t)width) {
+            width = (int)raw_length;
+        }
+        if (canonical_length > (size_t)width) {
+            width = (int)canonical_length;
+        }
+    }
+    return width;
+}
+
+static void finalize_student_ids(ProblemData *problem_data,
+                                 StudentIdPolicy requested_policy,
+                                 int requested_width,
+                                 int interactive,
+                                 int assume_yes)
+{
+    int student_index;
+    int display_width;
+    StudentIdPolicy policy = effective_student_id_policy(problem_data,
+                                                         requested_policy,
+                                                         interactive,
+                                                         assume_yes);
+
+    problem_data->id_policy = policy;
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        problem_data->students[student_index].canonical_id =
+            canonical_student_id_for_policy(policy,
+                                            problem_data->students[student_index].raw_id,
+                                            "student id");
+    }
+
+    if (policy == ID_POLICY_TOKEN) {
+        for (student_index = 0;
+             student_index < problem_data->student_count;
+             student_index++) {
+            problem_data->students[student_index].student_id =
+                duplicate_text(problem_data->students[student_index].raw_id);
+        }
+    } else {
+        display_width =
+            policy == ID_POLICY_ASSIGNMENT5 ?
+            5 :
+            auto_numeric_student_id_width(problem_data, requested_width);
+        problem_data->student_id_width = display_width;
+        for (student_index = 0;
+             student_index < problem_data->student_count;
+             student_index++) {
+            problem_data->students[student_index].student_id =
+                display_numeric_student_id(
+                    problem_data->students[student_index].canonical_id,
+                    display_width,
+                    "student id");
+        }
+    }
+    build_student_hash_index(problem_data);
 }
 
 static void check_no_extra_token(Tokenizer *tokenizer, const char *context)
@@ -1951,6 +2324,8 @@ static void free_problem_data(ProblemData *problem_data)
     }
     if (problem_data->students != NULL) {
         for (index_value = 0; index_value < problem_data->student_count; index_value++) {
+            free(problem_data->students[index_value].raw_id);
+            free(problem_data->students[index_value].canonical_id);
             free(problem_data->students[index_value].student_id);
         }
     }
@@ -1958,6 +2333,7 @@ static void free_problem_data(ProblemData *problem_data)
     free(problem_data->students);
     free(problem_data->rank_by_student_lab);
     free(problem_data->lab_hash_indices);
+    free(problem_data->student_hash_indices);
 }
 
 static void read_lab_file(const char *lab_file_path, ProblemData *problem_data)
@@ -2036,7 +2412,9 @@ static void read_lab_file(const char *lab_file_path, ProblemData *problem_data)
     }
 }
 
-static void read_preference_file(const char *preference_file_path, ProblemData *problem_data)
+static void read_preference_file(const char *preference_file_path,
+                                 ProblemData *problem_data,
+                                 const ProgramOptions *options)
 {
     FastInput preference_input;
     char *line;
@@ -2045,7 +2423,6 @@ static void read_preference_file(const char *preference_file_path, ProblemData *
     int student_index;
     int default_rank;
     int *seen_stamp;
-    StudentHashIndex student_hash;
 
     fast_input_open(&preference_input, preference_file_path);
 
@@ -2072,7 +2449,6 @@ static void read_preference_file(const char *preference_file_path, ProblemData *
 
     problem_data->students = checked_calloc((size_t)problem_data->student_count,
                                             sizeof(StudentInfo));
-    student_hash = student_hash_index_create(problem_data->student_count);
     seen_stamp = checked_calloc((size_t)problem_data->lab_count, sizeof(int));
     default_rank = problem_data->lab_count + 1;
     {
@@ -2102,17 +2478,8 @@ static void read_preference_file(const char *preference_file_path, ProblemData *
         if (student_id_token == NULL) {
             fail_with_context(context, "missing student id");
         }
-        validate_student_id_token(student_id_token, context);
-        if (student_id_already_seen_or_insert(&student_hash,
-                                              problem_data,
-                                              student_id_token,
-                                              student_index)) {
-            fail_with_context_format_hint(context,
-                                          "each student id may appear only once",
-                                          "duplicate student id '%s'",
-                                          student_id_token);
-        }
-        problem_data->students[student_index].student_id = duplicate_text(student_id_token);
+        problem_data->students[student_index].raw_id =
+            duplicate_text(student_id_token);
 
         for (preference_index = 0;
              preference_index < problem_data->max_preferences;
@@ -2156,19 +2523,26 @@ static void read_preference_file(const char *preference_file_path, ProblemData *
     }
 
     free(seen_stamp);
-    student_hash_index_free(&student_hash);
     fast_input_close(&preference_input);
+    finalize_student_ids(problem_data,
+                         options->id_policy,
+                         options->student_id_width,
+                         options->interactive,
+                         options->assume_yes);
 }
 
 static ProblemData read_problem_data(const char *lab_file_path,
-                                     const char *preference_file_path)
+                                     const char *preference_file_path,
+                                     const ProgramOptions *options)
 {
     ProblemData problem_data;
 
     memset(&problem_data, 0, sizeof(problem_data));
+    problem_data.id_policy = options->id_policy;
+    problem_data.student_id_width = options->student_id_width;
     read_lab_file(lab_file_path, &problem_data);
     build_lab_hash_index(&problem_data);
-    read_preference_file(preference_file_path, &problem_data);
+    read_preference_file(preference_file_path, &problem_data, options);
     return problem_data;
 }
 
@@ -2274,8 +2648,7 @@ static int parse_constraint_student(const ProblemData *problem_data,
                                     const char *context)
 {
     int student_index;
-    validate_student_id_token(student_id, context);
-    student_index = find_student_index(problem_data, student_id);
+    student_index = find_student_index(problem_data, student_id, context);
     if (student_index < 0) {
         fail_with_context_format(context, "unknown student id '%s'", student_id);
     }
@@ -9606,11 +9979,15 @@ static void parse_try_lock_text(const ProblemData *problem_data,
         *separator = '\0';
         student_index = parse_constraint_student(problem_data, text, "--try-lock");
         lab_index = parse_constraint_lab(problem_data, separator + 1, "--try-lock");
-        if (options->explain_student_id != NULL &&
-            strcmp(options->explain_student_id,
-                   problem_data->students[student_index].student_id) != 0) {
-            free(text);
-            fail_with_context("--try-lock", "student id differs from --explain-student");
+        if (options->explain_student_id != NULL) {
+            int explained_student_index =
+                parse_constraint_student(problem_data,
+                                         options->explain_student_id,
+                                         "--explain-student");
+            if (explained_student_index != student_index) {
+                free(text);
+                fail_with_context("--try-lock", "student id differs from --explain-student");
+            }
         }
         *student_index_out = student_index;
         *lab_index_out = lab_index;
@@ -9795,9 +10172,9 @@ static int spawn_portfolio_child(const ProgramOptions *options,
                                  const PortfolioCandidate *candidate,
                                  const char *candidate_output_path)
 {
-    char *allocated_strings[16];
+    char *allocated_strings[32];
     int allocated_count = 0;
-    char *child_argv[64];
+    char *child_argv[96];
     int arg_index = 0;
     pid_t child_pid;
 
@@ -9817,6 +10194,17 @@ static int spawn_portfolio_child(const ProgramOptions *options,
     ADD_LITERAL(objective_mode_command_name(candidate->objective_mode));
     ADD_LITERAL("--max-rank-slack");
     ADD_ALLOCATED(format_int_argument(candidate->max_rank_slack));
+    ADD_LITERAL("--id-policy");
+    ADD_LITERAL(student_id_policy_name(options->id_policy));
+    if (options->id_policy != ID_POLICY_TOKEN) {
+        ADD_LITERAL("--student-id-width");
+        if (options->student_id_width == AUTO_STUDENT_ID_WIDTH) {
+            ADD_LITERAL("auto");
+        } else {
+            ADD_ALLOCATED(format_int_argument(options->student_id_width));
+        }
+    }
+    ADD_LITERAL("--assume-yes");
     ADD_LITERAL("--first-choice-gap");
     ADD_ALLOCATED(format_long_long_argument(options->rank_cost_model.first_choice_gap));
     ADD_LITERAL("--rank-tail-linear");
@@ -10110,6 +10498,10 @@ static ProgramOptions default_program_options(void)
     options.portfolio_mode = 0;
     options.keep_candidate_files = 1;
     options.quiet = 0;
+    options.id_policy = ID_POLICY_AUTO;
+    options.student_id_width = AUTO_STUDENT_ID_WIDTH;
+    options.interactive = 1;
+    options.assume_yes = 0;
     options.jobs = 1;
     options.objective_mode = OBJECTIVE_RUBRIC;
     options.max_rank_slack = 1;
@@ -10337,6 +10729,24 @@ static ProgramOptions parse_program_options(int argc, char **argv)
                                 1,
                                 64,
                                 argument);
+        } else if (strcmp(argument, "--id-policy") == 0) {
+            options.id_policy =
+                parse_student_id_policy(require_option_value(argc,
+                                                             argv,
+                                                             &argument_index,
+                                                             argument));
+        } else if (strcmp(argument, "--student-id-width") == 0) {
+            options.student_id_width =
+                parse_student_id_width(require_option_value(argc,
+                                                            argv,
+                                                            &argument_index,
+                                                            argument));
+        } else if (strcmp(argument, "--interactive") == 0) {
+            options.interactive = 1;
+        } else if (strcmp(argument, "--no-interactive") == 0) {
+            options.interactive = 0;
+        } else if (strcmp(argument, "--assume-yes") == 0) {
+            options.assume_yes = 1;
         } else if (strcmp(argument, "--objective") == 0) {
             options.objective_mode =
                 parse_objective_mode(require_option_value(argc,
@@ -10570,7 +10980,10 @@ int main(int argc, char **argv)
                                                               argv[3],
                                                               options.portfolio_mode);
     }
-    problem_data = read_problem_data(argv[1], argv[2]);
+    problem_data = read_problem_data(argv[1], argv[2], &options);
+    options.id_policy = problem_data.id_policy;
+    options.student_id_width = problem_data.student_id_width;
+    options.assume_yes = 1;
     if (options.rank_costs_path != NULL) {
         load_rank_costs_file(options.rank_costs_path,
                              &problem_data,

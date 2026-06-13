@@ -9,7 +9,7 @@
 \title{An Exact Lexicographic Min-Cost Flow Solver\\
 for the Laboratory Assignment Problem}
 \author{Meteo}
-\date{\today}
+\date{2026-06-13}
 
 \newtheorem{theorem}{Theorem}
 \newtheorem{lemma}{Lemma}
@@ -624,47 +624,56 @@ index and a coefficient \(-1\).  During shortest-path comparisons, the solver
 compares the accumulated coefficient vectors by evaluating the corresponding
 big-integer weighted sums exactly.
 
-\begin{theorem}
-The final tie-break phase maximizes \(U_{\mathrm{avg}}\) without worsening
-\(Q\), \(R_1\), \(R_2\), or \(U_{\min}\).
+\begin{theorem}[Exact fill tie-breakers]
+After the rank-side prefix of a selected objective mode has been fixed, the
+solver applies the selected fill tie-breaker exactly.  For average-first modes
+such as \texttt{rubric}, \texttt{satisfaction}, and \texttt{guarded}, it first
+maximizes \(U_{\mathrm{avg}}\), then maximizes \(U_{\min}\) subject to
+preserving that optimal \(U_{\mathrm{avg}}\).  For minimum-first modes such as
+\texttt{fair} and \texttt{balanced}, it first maximizes \(U_{\min}\), then
+maximizes \(U_{\mathrm{avg}}\) subject to preserving that optimal \(U_{\min}\).
 \end{theorem}
 
 \begin{proof}
-The final phase uses the already fixed rank threshold and the already fixed
-minimum laboratory counts that realize the optimal \(U_{\min}\).  Therefore
-every feasible flow in this phase preserves the earlier hard and
-lexicographic constraints.  On a laboratory-to-sink edge, sending one more
-unit to laboratory \(j\) decreases the min-cost objective by \(W_j\).  Hence
-the fourth comparison component of a full flow is
+At this point the earlier rank-side constraints are represented as hard
+conditions: the selected rank threshold and the already optimal additive rank
+costs must be preserved.  In an average-first phase, each laboratory-to-sink
+unit of flow for laboratory \(j\) contributes the exact reward represented by
+\(W_j\).  Thus the fill component of a full flow is
 \[
   -\sum_{j\in P} n_j W_j.
 \]
 Minimizing this value is exactly the same as maximizing
 \(\sum_j n_j W_j\), and by the equality above, exactly the same as maximizing
-\(U_{\mathrm{avg}}\).  Since the comparison of the weighted sums is performed
-with integer arithmetic, no rounding can change the ordering.
+\(U_{\mathrm{avg}}\).  The subsequent minimum-fill phase adds the minimum
+count vector corresponding to a candidate threshold and searches for the
+largest threshold that can preserve the already optimal average-fill value.
+
+In a minimum-first phase the order is reversed.  The solver first searches
+minimum-count threshold vectors to find the largest achievable
+\(U_{\min}\).  With that vector fixed, the same exact average-fill comparison
+maximizes \(U_{\mathrm{avg}}\).  In both cases, weighted sums are compared
+with integer arithmetic, so no rounding can change the ordering.
 \end{proof}
 
-\subsection{Why Exact Comparison Is Needed Only at the End}
+\subsection{Why Exact Average Comparison Is Needed Only in Fill Phases}
 
-The average fill-rate comparison is not needed in every flow computation.
-Before the final phase, the solver is still deciding \(Q\), then \(R_1\),
-then \(R_2\), then \(U_{\min}\).  If two partial costs differ in any earlier
-component, \(U_{\mathrm{avg}}\) cannot change the lexicographic decision.
-Therefore the expensive big-integer comparison is used only in the final
-tie-break phase, and only after the ordinary integer components are equal.
+The average fill-rate comparison is not needed while the solver is still
+deciding an earlier lexicographic component.  If two partial costs differ in
+rank sum, rank-square sum, worst rank, or an already selected minimum-fill
+threshold, \(U_{\mathrm{avg}}\) cannot change that lexicographic decision.
+Therefore the expensive big-integer comparison is used only in phases where
+the selected objective mode actually compares average fill among assignments
+whose earlier components are already tied.
 
-This preserves the same earlier optimum set:
-\[
-  \{x\mid Q,R_1,R_2,U_{\min}\ \text{are all optimal}\}.
-\]
-The final exact comparison only chooses the member of this set with maximum
-\(U_{\mathrm{avg}}\).  Thus the exact version can change the assignment
-relative to a scaled implementation only when the first four components tie
-and the scaled approximation orders the remaining assignments incorrectly.
-Such cases are possible with large capacities, which is why the submitted
-solver uses exact big-integer comparison instead of claiming that a fixed
-scale is always safe.
+For average-first modes, the exact comparison chooses the member of the
+rank-side optimum set with maximum \(U_{\mathrm{avg}}\), and a later phase
+chooses maximum \(U_{\min}\) without losing that value.  For minimum-first
+modes, the minimum-fill value is fixed first, and the exact comparison then
+chooses maximum \(U_{\mathrm{avg}}\) inside that smaller optimum set.  Such
+cases are possible with large capacities, which is why the submitted solver
+uses exact big-integer comparison instead of claiming that a fixed scale is
+always safe.
 
 \subsection{Weighted Exact Objective Mode}
 
@@ -1063,7 +1072,7 @@ The repository contains the following concrete datasets under
 \toprule
 Dataset & Purpose & Optimality evidence \\
 \midrule
-\texttt{pdf\_sample} & Handout-format sample & General flow theorem \\
+\texttt{synthetic\_sample} & Handout-format sample & General flow theorem \\
 \texttt{forced\_outside} & Forced outside preference & Exhaustive search \\
 \texttt{zero\_capacity} & Zero-capacity laboratory & Exhaustive search \\
 \texttt{rank\_variance} & Rank-sum and variance tie & Exhaustive search \\

@@ -282,6 +282,44 @@ weighted-exact preset behavior:
 `--explain-weights` is a top-level inspection command.  It does not take lab,
 preference, or output files.
 
+## Student Identifier Policies
+
+The original assignment-style input uses numeric student identifiers and the
+solver writes them as zero-padded five-digit IDs such as `00001`.  For public
+and operational use, the solver can also treat the first column as larger
+numeric IDs or opaque tokens such as `e23213`, email-style IDs, or
+`学生_甲`.
+
+By default, `--id-policy auto` is used.  If all input IDs are already
+zero-padded assignment-style IDs, the run proceeds without interaction.  If the
+solver detects IDs that need normalization, such as `1`, or non-assignment
+tokens, it asks for y/N confirmation only when standard input is a terminal.
+In scripts, CI, portfolio child processes, or other non-interactive runs, it
+does not block; it exits with a hint asking you to choose an explicit policy or
+pass `--assume-yes`.
+
+```sh
+# Original assignment compatibility. Numeric IDs in 1..99999 are output as 00001.
+./assign_labs labs.txt prefs.txt out.txt --id-policy assignment5
+
+# Larger numeric IDs. Leading zeros are normalized for duplicate detection.
+./assign_labs labs.txt prefs.txt out.txt --id-policy numeric --student-id-width auto
+
+# OSS/operations mode. The first column is an opaque whitespace-free token.
+./assign_labs labs.txt prefs_token.txt out.txt --id-policy token
+
+# Auto-detect in a batch job without a prompt.
+./assign_labs labs.txt prefs.txt out.txt --id-policy auto --assume-yes
+```
+
+Numeric policies compare IDs after normalization, so `1`, `001`, and `00001`
+refer to the same student.  Output formatting is separate from lookup:
+`assignment5` always writes five digits, while `numeric` uses the widest input
+or canonical numeric width unless `--student-id-width N` is supplied.  Token
+mode preserves the input token exactly and does not lowercase or Unicode-
+normalize it; if you need NFC normalization or CSV conversion, do that in an
+input-preparation step.
+
 `weighted-exact` minimizes the exact weighted score
 `w1*R1 + w2*R2 + w3*Q - w4*Uavg - w5*Umin + w6*outside + w7*changed`.
 Weights are nonnegative integers.  The mode uses `R2` rather than the standard
@@ -430,8 +468,11 @@ student_id assigned_lab_name
 
 The order of assignment lines is deterministic but not part of the
 optimization objective.  The output contains exactly one assignment for every
-input student id.  External evaluation does not depend on whether the lines
-are sorted.
+input student after the selected identifier policy is applied.  With
+`--id-policy assignment5`, IDs such as `1` are written as `00001`; with
+`--id-policy numeric`, the configured numeric width is used; with
+`--id-policy token`, the original token is preserved.  External evaluation does
+not depend on whether the lines are sorted.
 
 Numerical scores and readable summaries are written to sidecar files only when
 `--reports` is specified.  This avoids breaking external tools that expect exactly

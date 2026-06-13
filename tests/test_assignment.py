@@ -734,6 +734,113 @@ def test_line_level_parser_errors_are_preserved(
     assert not output_path.exists()
 
 
+def test_assignment5_id_policy_zero_pads_and_detects_normalized_duplicates(tmp_path):
+    lab_text = """\
+2
+A 2
+B 1
+"""
+    preference_text = """\
+3 2
+1 A B
+2 A B
+3 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=["--id-policy", "assignment5"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    assignments = read_output(output_path)
+    assert set(assignments) == {"00001", "00002", "00003"}
+
+    duplicate_preferences = """\
+2 1
+1 A
+00001 A
+"""
+    completed, duplicate_output_path = run_solver(
+        tmp_path / "duplicate",
+        "1\nA 2\n",
+        duplicate_preferences,
+        extra_args=["--id-policy", "assignment5"],
+    )
+    assert completed.returncode != 0
+    assert "duplicate student id" in completed.stderr
+    assert not duplicate_output_path.exists()
+
+
+def test_default_auto_id_policy_never_prompts_when_stdin_is_not_tty(tmp_path):
+    lab_text = """\
+1
+A 2
+"""
+    preference_text = """\
+2 1
+1 A
+2 A
+"""
+    completed, output_path = run_solver(tmp_path, lab_text, preference_text)
+    assert completed.returncode != 0
+    assert "cannot ask for confirmation" in completed.stderr
+    assert "--id-policy assignment5" in completed.stderr
+    assert not output_path.exists()
+
+
+def test_numeric_and_token_id_policies_accept_oss_identifiers(tmp_path):
+    lab_text = """\
+2
+A 2
+B 1
+"""
+    numeric_preferences = """\
+3 2
+100000 A B
+000002 A B
+3 B A
+"""
+    completed, numeric_output_path = run_solver(
+        tmp_path / "numeric",
+        lab_text,
+        numeric_preferences,
+        extra_args=["--id-policy", "numeric"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    numeric_assignments = read_output(numeric_output_path)
+    assert set(numeric_assignments) == {"100000", "000002", "000003"}
+
+    token_preferences = """\
+3 2
+e23213 A B
+e23214@example.ac.jp A B
+学生_甲 B A
+"""
+    completed, token_output_path = run_solver(
+        tmp_path / "token",
+        lab_text,
+        token_preferences,
+        extra_args=["--id-policy", "token"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    token_assignments = read_output(token_output_path)
+    assert set(token_assignments) == {
+        "e23213",
+        "e23214@example.ac.jp",
+        "学生_甲",
+    }
+
+    completed, auto_output_path = run_solver(
+        tmp_path / "auto",
+        lab_text,
+        token_preferences,
+        extra_args=["--id-policy", "auto", "--assume-yes"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert read_output(auto_output_path) == token_assignments
+
+
 def test_total_capacity_smaller_than_students_is_rejected_without_deleting_existing_output(tmp_path):
     lab_text = """\
 2
@@ -1539,6 +1646,65 @@ B 2
     assert "00001\tA\tB" in adjustment_text
 
 
+def test_normalized_student_ids_work_in_constraints_base_and_explain(tmp_path):
+    lab_text = """\
+2
+A 2
+B 2
+"""
+    preference_text = """\
+3 2
+00001 B A
+00002 A B
+00003 A B
+"""
+    constraints_text = "lock 1 B\n"
+    base_text = """\
+3
+1 A
+2 A
+3 B
+"""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lab_path = tmp_path / "labs.txt"
+    preference_path = tmp_path / "preferences.txt"
+    constraints_path = tmp_path / "constraints.txt"
+    base_path = tmp_path / "base.txt"
+    output_path = tmp_path / "adjusted.txt"
+    write_text(lab_path, lab_text)
+    write_text(preference_path, preference_text)
+    write_text(constraints_path, constraints_text)
+    write_text(base_path, base_text)
+    completed = subprocess.run(
+        [
+            str(BINARY),
+            str(lab_path),
+            str(preference_path),
+            str(output_path),
+            "--constraints",
+            str(constraints_path),
+            "--base-assignment",
+            str(base_path),
+            "--change-penalty",
+            "100",
+            "--explain-student",
+            "1",
+            "--try-lock",
+            "00001:B",
+            "--reports",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assignments = validate_assignment(lab_text, preference_text, output_path)
+    assert assignments["00001"] == "B"
+    explain_rows = read_tsv(Path(str(output_path) + ".explain.tsv"))
+    assert explain_rows[0]["student_id"] == "00001"
+    assert explain_rows[0]["try_lab"] == "B"
+
+
 def test_exact_counterfactual_explanation_reports_reoptimized_impact(tmp_path):
     lab_text = """\
 3
@@ -1846,6 +2012,45 @@ C 2
         assert candidate_path.exists()
         assert metrics_path_for(candidate_path).exists()
         validate_assignment(lab_text, preference_text, candidate_path)
+
+
+def test_c_portfolio_jobs_propagates_token_id_policy_to_children(tmp_path):
+    lab_text = """\
+3
+A 2
+B 2
+C 2
+"""
+    preference_text = """\
+4 2
+e23213 A B
+e23214@example.ac.jp A C
+学生_甲 B C
+KAWADA-23215 C A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--id-policy",
+            "token",
+            "--portfolio",
+            "--jobs",
+            "2",
+            "--portfolio-summary-only",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    assignments = read_output(output_path)
+    assert set(assignments) == {
+        "e23213",
+        "e23214@example.ac.jp",
+        "学生_甲",
+        "KAWADA-23215",
+    }
+    assert Path(str(output_path) + ".portfolio.tsv").exists()
+    assert not Path(str(output_path) + ".rubric.txt").exists()
 
 
 def test_portfolio_summary_only_removes_candidate_outputs(tmp_path):
