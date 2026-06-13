@@ -3634,7 +3634,7 @@ static int find_minimum_feasible_max_rank_at_most(const ProblemData *problem_dat
     q_upper_bound = target_rank_upper_bound(problem_data, q_upper_bound);
     if (q_upper_bound < 1) {
         fail_with_context("target constraints",
-                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+                          "No feasible solution: max-rank target leaves no allowable rank");
     }
 
     if (all_students_have_identical_rank_rows(problem_data)) {
@@ -3642,7 +3642,7 @@ static int find_minimum_feasible_max_rank_at_most(const ProblemData *problem_dat
         if (answer_rank > q_upper_bound ||
             !has_feasible_assignment(problem_data, q_upper_bound)) {
             fail_with_context("target constraints",
-                              "解が存在しませんでした: no feasible assignment satisfies the rank target");
+                              "No feasible solution: no feasible assignment satisfies the rank target");
         }
         return answer_rank;
     }
@@ -3656,14 +3656,14 @@ static int find_minimum_feasible_max_rank_at_most(const ProblemData *problem_dat
     if (high_index < 0) {
         int_list_free(&candidates);
         fail_with_context("target constraints",
-                          "解が存在しませんでした: no rank threshold candidate satisfies the target");
+                          "No feasible solution: no rank threshold candidate satisfies the target");
     }
     answer_rank = candidates.items[high_index];
 
     if (!has_feasible_assignment(problem_data, answer_rank)) {
         int_list_free(&candidates);
         fail_with_context("target constraints",
-                          "解が存在しませんでした: no feasible assignment satisfies the rank/fill targets");
+                          "No feasible solution: no feasible assignment satisfies the rank/fill targets");
     }
 
     low_index = 0;
@@ -6064,18 +6064,18 @@ static void validate_target_constraints_against_problem(
     if (target_rank_sum_limit(problem_data, &rank_sum_limit) &&
         rank_sum_limit < (long long)problem_data->student_count) {
         fail_with_context("target constraints",
-                          "解が存在しませんでした: average-rank/rank-sum target is below the theoretical minimum");
+                          "No feasible solution: average-rank/rank-sum target is below the theoretical minimum");
     }
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         int required_count = target_minimum_count_for_lab(problem_data, lab_index);
         if (required_count > problem_data->labs[lab_index].graph_capacity) {
             fail_with_context("target constraints",
-                              "解が存在しませんでした: minimum-fill target exceeds a lab capacity");
+                              "No feasible solution: minimum-fill target exceeds a lab capacity");
         }
         minimum_sum += required_count;
         if (minimum_sum > problem_data->student_count) {
             fail_with_context("target constraints",
-                              "解が存在しませんでした: minimum-fill targets require more students than available");
+                              "No feasible solution: minimum-fill targets require more students than available");
         }
     }
 }
@@ -7206,7 +7206,7 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
     q_upper_bound = target_rank_upper_bound(problem_data, q_upper_bound);
     if (q_upper_bound < 1) {
         fail_with_context("target constraints",
-                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+                          "No feasible solution: max-rank target leaves no allowable rank");
     }
     active_groups =
         build_student_groups(problem_data, q_upper_bound, STUDENT_GROUP_ACTIVE_RANK);
@@ -7228,7 +7228,7 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
         free_student_groups(&active_groups);
         free(base_minimum_counts);
         fail_with_context("target constraints",
-                          "解が存在しませんでした: no feasible assignment satisfies the rank/fill targets");
+                          "No feasible solution: no feasible assignment satisfies the rank/fill targets");
     }
     base_solution = optional_base_solution.solution;
     base_solution_max_rank = max_rank_for_solution(problem_data, base_solution.assignment);
@@ -7319,7 +7319,7 @@ static int find_fair_max_rank_satisfying_rank_sum_targets(
                                            problem_data->lab_count + 1);
     if (q_upper_bound < 1) {
         fail_with_context("target constraints",
-                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+                          "No feasible solution: max-rank target leaves no allowable rank");
     }
     candidates = build_rank_threshold_candidates(problem_data);
     first_q_index = int_list_first_index_at_least(&candidates, 1);
@@ -7327,7 +7327,7 @@ static int find_fair_max_rank_satisfying_rank_sum_targets(
     if (first_q_index > last_q_index) {
         int_list_free(&candidates);
         fail_with_context("target constraints",
-                          "解が存在しませんでした: no rank threshold candidate satisfies the target");
+                          "No feasible solution: no rank threshold candidate satisfies the target");
     }
 
     base_minimum_counts = build_base_minimum_counts(problem_data);
@@ -7371,7 +7371,7 @@ static int find_fair_max_rank_satisfying_rank_sum_targets(
     free(base_minimum_counts);
     int_list_free(&candidates);
     fail_with_context("target constraints",
-                      "解が存在しませんでした: no feasible assignment satisfies the average-rank/rank-sum target");
+                      "No feasible solution: no feasible assignment satisfies the average-rank/rank-sum target");
     return 0;
 }
 
@@ -7625,7 +7625,7 @@ static int *solve_convex_fill_problem(const ProblemData *problem_data)
         convex_fill_context_create(problem_data);
     if (max_rank < 1) {
         fail_with_context("target constraints",
-                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+                          "No feasible solution: max-rank target leaves no allowable rank");
     }
     StudentGroups active_groups =
         build_student_groups(problem_data, max_rank, STUDENT_GROUP_ACTIVE_RANK);
@@ -8492,7 +8492,7 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
         weighted_average_fast_path_free(&average_fast_path);
         exact_average_context_free(&score_context);
         fail_with_context("target constraints",
-                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+                          "No feasible solution: max-rank target leaves no allowable rank");
     }
 
     first_q_index = int_list_first_index_at_least(&rank_candidates, q_start);
@@ -12508,7 +12508,7 @@ int main(int argc, char **argv)
             }
             free(base_assignment);
             fail_with_context("target constraints",
-                              "解が存在しませんでした: selected objective has no feasible solution satisfying all required targets");
+                              "No feasible solution: selected objective has no feasible solution satisfying all required targets");
         }
         free_evaluation_metrics(&target_metrics);
     }

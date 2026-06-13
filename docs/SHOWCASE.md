@@ -162,7 +162,7 @@ outside_preference_count	<=	0	0	pass	0
 ```
 
 If no assignment satisfies all required targets, the solver exits before
-writing `out.txt` and includes `解が存在しませんでした` in the error message.
+writing `out.txt` and includes `No feasible solution` in the error message.
 
 ## 5. Large Benchmark
 

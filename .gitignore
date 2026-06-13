@@ -11,6 +11,7 @@ lab-assignment-solver-source.zip
 assignment.plist
 /202*.pdf
 docs/*.pdf
+!docs/algorithm_paper.pdf
 *.metrics.txt
 *.by_lab.txt
 *.by_student.tsv

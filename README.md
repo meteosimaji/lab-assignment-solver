@@ -9,7 +9,8 @@ The default mode writes only the simple student-to-laboratory assignment output.
 For the proof that the solver is exact for the selected objective and that the
 speedups preserve the same answer, see
 [`docs/ALGORITHM_PROOF.md`](docs/ALGORITHM_PROOF.md).  The longer TeX write-up
-is in [`docs/algorithm_paper.tex`](docs/algorithm_paper.tex).
+is in [`docs/algorithm_paper.tex`](docs/algorithm_paper.tex), with a generated
+PDF at [`docs/algorithm_paper.pdf`](docs/algorithm_paper.pdf).
 
 ## Showcase
 
@@ -313,7 +314,7 @@ If no assignment satisfies all hard targets, the solver exits before writing the
 assignment file and reports:
 
 ```text
-解が存在しませんでした
+No feasible solution
 ```
 
 The same targets can be stored in a file:

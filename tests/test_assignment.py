@@ -2189,7 +2189,7 @@ B 1
         ],
     )
     assert completed.returncode != 0
-    assert "解が存在しませんでした" in completed.stderr
+    assert "No feasible solution" in completed.stderr
     assert not output_path.exists()
     assert not target_status_path_for(output_path).exists()
 
