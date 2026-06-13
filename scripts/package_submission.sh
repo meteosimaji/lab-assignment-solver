@@ -7,6 +7,7 @@ submission_files="$submission_files docs/ALGORITHM_PROOF.md docs/algorithm_paper
 if [ -f docs/algorithm_paper.pdf ]; then
   submission_files="$submission_files docs/algorithm_paper.pdf"
 fi
+submission_files="$submission_files docs/SHOWCASE.md docs/OPTIMIZATION_NOTES.md"
 submission_files="$submission_files docs/benchmark_results.tsv scripts"
 
 zip -r submit.zip $submission_files \

@@ -30,6 +30,7 @@
 #define AVERAGE_FILL_LINEAR_PROBE_LIMIT 8
 #define WEIGHTED_SEED_MAX_Q_AXIS 32
 #define WEIGHTED_SEED_MIN_GRID_SIZE 128LL
+#define WEIGHTED_LIGHT_SEED_MIN_GRID_SIZE 32LL
 #define LIGHT_PORTFOLIO_CANDIDATE_COUNT 5
 #define MAX_PORTFOLIO_CANDIDATES 8
 #define AUTO_STUDENT_ID_WIDTH -1
@@ -420,6 +421,13 @@ typedef struct {
     int count;
     int enabled;
 } WeightedStudentGroupCache;
+
+typedef struct {
+    StudentGroups *groups;
+    unsigned char *computed;
+    int count;
+    StudentGroupingMode grouping_mode;
+} StudentGroupCache;
 
 typedef struct {
     int lab_index;
@@ -3139,11 +3147,7 @@ static void int_list_free(IntList *list)
 static IntList build_rank_threshold_candidates(const ProblemData *problem_data)
 {
     IntList candidates;
-    int max_rank = problem_data->lab_count + 1;
-    unsigned char *seen =
-        checked_calloc((size_t)max_rank + 1U, sizeof(unsigned char));
-    int student_index;
-    int lab_index;
+    int outside_rank = problem_data->lab_count + 1;
     int rank_value;
 
     if (active_profile != NULL) {
@@ -3151,28 +3155,14 @@ static IntList build_rank_threshold_candidates(const ProblemData *problem_data)
     }
     int_list_init(&candidates);
 
-    for (student_index = 0;
-         student_index < problem_data->student_count;
-         student_index++) {
-        for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
-            if (problem_data->labs[lab_index].graph_capacity <= 0) {
-                continue;
-            }
-            rank_value = rank_for_assignment(problem_data, student_index, lab_index);
-            if (rank_value >= 1 && rank_value <= max_rank) {
-                seen[rank_value] = 1U;
-            }
-        }
+    for (rank_value = 1;
+         rank_value <= problem_data->max_preferences &&
+         rank_value < outside_rank;
+         rank_value++) {
+        int_list_push(&candidates, rank_value);
     }
+    int_list_push(&candidates, outside_rank);
 
-    seen[max_rank] = 1U;
-    for (rank_value = 1; rank_value <= max_rank; rank_value++) {
-        if (seen[rank_value]) {
-            int_list_push(&candidates, rank_value);
-        }
-    }
-
-    free(seen);
     return candidates;
 }
 
@@ -3697,6 +3687,56 @@ static void free_student_groups(StudentGroups *groups)
     groups->next_member = NULL;
     groups->student_to_group = NULL;
     groups->count = 0;
+}
+
+static StudentGroupCache student_group_cache_create(int count,
+                                                    StudentGroupingMode grouping_mode)
+{
+    StudentGroupCache cache;
+    cache.count = count;
+    cache.grouping_mode = grouping_mode;
+    cache.groups = checked_calloc((size_t)count, sizeof(StudentGroups));
+    cache.computed = checked_calloc((size_t)count, sizeof(unsigned char));
+    return cache;
+}
+
+static const StudentGroups *student_group_cache_get(
+    StudentGroupCache *cache,
+    const ProblemData *problem_data,
+    const IntList *rank_candidates,
+    int q_index)
+{
+    if (q_index < 0 || q_index >= cache->count) {
+        fail_with_context("student group cache", "cache index out of range");
+    }
+    if (!cache->computed[q_index]) {
+        cache->groups[q_index] =
+            build_student_groups(problem_data,
+                                 rank_candidates->items[q_index],
+                                 cache->grouping_mode);
+        cache->computed[q_index] = 1U;
+    }
+    if (cache->groups[q_index].count >= problem_data->student_count) {
+        return NULL;
+    }
+    return &cache->groups[q_index];
+}
+
+static void student_group_cache_free(StudentGroupCache *cache)
+{
+    int q_index;
+    if (cache->groups != NULL && cache->computed != NULL) {
+        for (q_index = 0; q_index < cache->count; q_index++) {
+            if (cache->computed[q_index]) {
+                free_student_groups(&cache->groups[q_index]);
+            }
+        }
+    }
+    free(cache->groups);
+    free(cache->computed);
+    cache->groups = NULL;
+    cache->computed = NULL;
+    cache->count = 0;
 }
 
 static void heap_init(MinHeap *heap, int node_count)
@@ -5554,16 +5594,41 @@ static int ceil_ratio_times_capacity(RatioValue ratio,
                                      long long capacity_value,
                                      int count_limit)
 {
+#if defined(__SIZEOF_INT128__)
+    __uint128_t numerator;
+    __uint128_t denominator;
+    __uint128_t capacity;
+    __uint128_t limit;
+    __uint128_t product;
+    __uint128_t result;
+#else
     long long quotient = 0LL;
     long long remainder = 0LL;
     long long whole_part;
     long long partial_remainder;
     long long carry;
     long long iteration;
+#endif
     if (capacity_value <= 0LL || ratio.numerator <= 0LL) {
         return 0;
     }
 
+#if defined(__SIZEOF_INT128__)
+    numerator = (__uint128_t)ratio.numerator;
+    denominator = (__uint128_t)ratio.denominator;
+    capacity = (__uint128_t)capacity_value;
+    limit = (__uint128_t)count_limit;
+    product = numerator * capacity;
+
+    if (product > limit * denominator) {
+        return count_limit + 1;
+    }
+    result = (product + denominator - 1U) / denominator;
+    if (result > limit) {
+        return count_limit + 1;
+    }
+    return (int)result;
+#else
     whole_part = capacity_value / ratio.denominator;
     partial_remainder = capacity_value % ratio.denominator;
 
@@ -5592,6 +5657,7 @@ static int ceil_ratio_times_capacity(RatioValue ratio,
         quotient++;
     }
     return (int)quotient;
+#endif
 }
 
 static int build_minimum_counts_for_ratio(const ProblemData *problem_data,
@@ -6339,20 +6405,15 @@ static int rank_target_is_achievable(const ProblemData *problem_data,
                                      int max_rank,
                                      const int *minimum_lab_counts,
                                      Cost rank_target,
-                                     const RankCostModel *rank_cost_model)
+                                     const RankCostModel *rank_cost_model,
+                                     const StudentGroups *active_group_pointer)
 {
-    StudentGroups active_groups;
-    const StudentGroups *active_group_pointer;
     OptionalSolutionResult candidate_solution;
     int required_count = sum_minimum_counts(problem_data, minimum_lab_counts);
     int achievable;
     if (active_profile != NULL) {
         active_profile->rank_target_checks++;
     }
-    active_groups =
-        build_student_groups(problem_data, max_rank, STUDENT_GROUP_ACTIVE_RANK);
-    active_group_pointer =
-        active_groups.count < problem_data->student_count ? &active_groups : NULL;
     candidate_solution = try_solve_with_minimum_counts(problem_data,
                                                        max_rank,
                                                        minimum_lab_counts,
@@ -6369,7 +6430,6 @@ static int rank_target_is_achievable(const ProblemData *problem_data,
                  rank_cost_matches_target(candidate_solution.solution.total_cost,
                                           rank_target);
     free_solution_result(&candidate_solution.solution);
-    free_student_groups(&active_groups);
     return achievable;
 }
 
@@ -6380,11 +6440,14 @@ static int find_minimum_q_preserving_rank_target(const ProblemData *problem_data
                                                  const RankCostModel *rank_cost_model)
 {
     IntList candidates = build_rank_threshold_candidates(problem_data);
+    StudentGroupCache group_cache =
+        student_group_cache_create(candidates.size, STUDENT_GROUP_ACTIVE_RANK);
     int low_index = int_list_first_index_at_least(&candidates, 1);
     int high_index = int_list_last_index_at_most(&candidates, q_upper_bound);
     int answer_rank;
 
     if (low_index > high_index) {
+        student_group_cache_free(&group_cache);
         int_list_free(&candidates);
         fail_with_context("solver", "no rank threshold candidate is available under guard");
     }
@@ -6393,17 +6456,24 @@ static int find_minimum_q_preserving_rank_target(const ProblemData *problem_data
     while (low_index <= high_index) {
         int middle_index = low_index + (high_index - low_index) / 2;
         int middle_rank = candidates.items[middle_index];
+        const StudentGroups *active_group_pointer =
+            student_group_cache_get(&group_cache,
+                                    problem_data,
+                                    &candidates,
+                                    middle_index);
         if (rank_target_is_achievable(problem_data,
                                       middle_rank,
                                       minimum_lab_counts,
                                       rank_target,
-                                      rank_cost_model)) {
+                                      rank_cost_model,
+                                      active_group_pointer)) {
             answer_rank = middle_rank;
             high_index = middle_index - 1;
         } else {
             low_index = middle_index + 1;
         }
     }
+    student_group_cache_free(&group_cache);
     int_list_free(&candidates);
     return answer_rank;
 }
@@ -7545,6 +7615,59 @@ static RatioValue maximum_ratio_in_minimum_candidate_range(
     return minimum_candidates->items[high_index].ratio;
 }
 
+static long double ratio_value_to_long_double(RatioValue ratio)
+{
+    if (ratio.denominator <= 0LL) {
+        return 0.0L;
+    }
+    return (long double)ratio.numerator / (long double)ratio.denominator;
+}
+
+static int weighted_box_should_split_q(
+    const WeightedSearchBox *box,
+    const WeightedObjective *weights,
+    const IntList *rank_candidates,
+    const MinimumCountCandidateList *minimum_candidates)
+{
+    int q_width = box->q_high_index - box->q_low_index;
+    int u_width = box->u_high_index - box->u_low_index;
+    long double q_spread;
+    long double u_spread;
+    long double u_low;
+    long double u_high;
+
+    if (q_width <= 0) {
+        return 0;
+    }
+    if (u_width <= 0) {
+        return 1;
+    }
+    if (weights->max_rank == 0LL && weights->minimum_fill != 0LL) {
+        return 0;
+    }
+    if (weights->minimum_fill == 0LL && weights->max_rank != 0LL) {
+        return 1;
+    }
+
+    q_spread =
+        (long double)weights->max_rank *
+        (long double)(rank_candidates->items[box->q_high_index] -
+                      rank_candidates->items[box->q_low_index]);
+    u_low = ratio_value_to_long_double(
+        minimum_candidates->items[box->u_low_index].ratio);
+    u_high = ratio_value_to_long_double(
+        minimum_candidates->items[box->u_high_index].ratio);
+    u_spread = (long double)weights->minimum_fill * (u_high - u_low);
+
+    if (q_spread > u_spread) {
+        return 1;
+    }
+    if (u_spread > q_spread) {
+        return 0;
+    }
+    return q_width >= u_width;
+}
+
 static SolutionResult weighted_solution_result_from_assignment(
     const ProblemData *problem_data,
     const int *assignment,
@@ -7599,21 +7722,19 @@ static void weighted_consider_solution(
     }
 }
 
-static void weighted_seed_initial_incumbent(
+static void weighted_consider_assignment_seed(
     const ProblemData *problem_data,
+    int *seed_assignment,
     const WeightedObjective *weights,
     const ExactAverageContext *score_context,
     SolutionResult *best_solution,
     SignedBigScore *best_score,
     int *best_score_is_set)
 {
-    WeightedObjective seed_weights = *weights;
-    int *seed_assignment;
     SolutionResult seed_solution;
-    seed_weights.average_fill = 0LL;
-    seed_weights.minimum_fill = 0LL;
-    seed_assignment =
-        solve_weighted_exact_integer_only_problem(problem_data, &seed_weights);
+    if (seed_assignment == NULL) {
+        return;
+    }
     seed_solution =
         weighted_solution_result_from_assignment(problem_data,
                                                  seed_assignment,
@@ -7627,6 +7748,89 @@ static void weighted_seed_initial_incumbent(
                                best_score,
                                best_score_is_set);
     free_solution_result(&seed_solution);
+}
+
+static void weighted_seed_initial_incumbent(
+    const ProblemData *problem_data,
+    const WeightedObjective *weights,
+    const ExactAverageContext *score_context,
+    SolutionResult *best_solution,
+    SignedBigScore *best_score,
+    int *best_score_is_set,
+    int include_light_objective_seeds)
+{
+    WeightedObjective seed_weights = *weights;
+    int *seed_assignment;
+    seed_weights.average_fill = 0LL;
+    seed_weights.minimum_fill = 0LL;
+    seed_assignment =
+        solve_weighted_exact_integer_only_problem(problem_data, &seed_weights);
+    weighted_consider_assignment_seed(problem_data,
+                                      seed_assignment,
+                                      weights,
+                                      score_context,
+                                      best_solution,
+                                      best_score,
+                                      best_score_is_set);
+
+    if (include_light_objective_seeds) {
+        int minimum_max_rank = find_minimum_feasible_max_rank(problem_data);
+
+        weighted_consider_assignment_seed(
+            problem_data,
+            solve_rank_first_problem(problem_data,
+                                     problem_data->lab_count + 1,
+                                     FILL_TIE_AVERAGE_THEN_MINIMUM,
+                                     NULL),
+            weights,
+            score_context,
+            best_solution,
+            best_score,
+            best_score_is_set);
+        weighted_consider_assignment_seed(
+            problem_data,
+            solve_rank_first_problem(problem_data,
+                                     problem_data->lab_count + 1,
+                                     FILL_TIE_MINIMUM_THEN_AVERAGE,
+                                     NULL),
+            weights,
+            score_context,
+            best_solution,
+            best_score,
+            best_score_is_set);
+        weighted_consider_assignment_seed(
+            problem_data,
+            solve_problem(problem_data, minimum_max_rank),
+            weights,
+            score_context,
+            best_solution,
+            best_score,
+            best_score_is_set);
+        weighted_consider_assignment_seed(
+            problem_data,
+            solve_rank_first_problem(problem_data,
+                                     minimum_max_rank,
+                                     FILL_TIE_AVERAGE_THEN_MINIMUM,
+                                     NULL),
+            weights,
+            score_context,
+            best_solution,
+            best_score,
+            best_score_is_set);
+        if (problem_data->rank_cost_model != NULL) {
+            weighted_consider_assignment_seed(
+                problem_data,
+                solve_rank_first_problem(problem_data,
+                                         problem_data->lab_count + 1,
+                                         FILL_TIE_AVERAGE_THEN_MINIMUM,
+                                         problem_data->rank_cost_model),
+                weights,
+                score_context,
+                best_solution,
+                best_score,
+                best_score_is_set);
+        }
+    }
 }
 
 static int weighted_compute_box_lower_bound(
@@ -7751,6 +7955,7 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
     int last_q_index;
     int q_start;
     int q_end = problem_data->lab_count + 1;
+    long long weighted_grid_size;
     WeightedSearchBoxHeap search_boxes;
     WeightedRelaxedCornerCache relaxed_corner_cache;
     WeightedStudentGroupCache student_group_cache;
@@ -7787,15 +7992,19 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
      * The first relaxed corner is considered as an incumbent anyway, so skip
      * this optional seed when the rank axis itself is large.
      */
-    if ((last_q_index - first_q_index + 1) <= WEIGHTED_SEED_MAX_Q_AXIS &&
+    weighted_grid_size =
         (long long)(last_q_index - first_q_index + 1) *
-            (long long)minimum_candidates.size > WEIGHTED_SEED_MIN_GRID_SIZE) {
+        (long long)minimum_candidates.size;
+    if ((last_q_index - first_q_index + 1) <= WEIGHTED_SEED_MAX_Q_AXIS &&
+        weighted_grid_size >= WEIGHTED_LIGHT_SEED_MIN_GRID_SIZE) {
         weighted_seed_initial_incumbent(problem_data,
                                         active_weights,
                                         &score_context,
                                         &best_solution,
                                         &best_score,
-                                        &best_score_is_set);
+                                        &best_score_is_set,
+                                        weighted_grid_size >=
+                                            WEIGHTED_SEED_MIN_GRID_SIZE);
     }
     {
         WeightedSearchBox initial_box;
@@ -7860,8 +8069,10 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
             box.u_low_index == box.u_high_index) {
             continue;
         }
-        if ((box.q_high_index - box.q_low_index) >=
-            (box.u_high_index - box.u_low_index)) {
+        if (weighted_box_should_split_q(&box,
+                                        active_weights,
+                                        &rank_candidates,
+                                        &minimum_candidates)) {
             int middle_index = box.q_low_index +
                                (box.q_high_index - box.q_low_index) / 2;
             WeightedSearchBox left_box;

@@ -11,6 +11,85 @@ speedups preserve the same answer, see
 [`docs/ALGORITHM_PROOF.md`](docs/ALGORITHM_PROOF.md).  The longer TeX write-up
 is in [`docs/algorithm_paper.tex`](docs/algorithm_paper.tex).
 
+## Showcase
+
+This is not a greedy first-choice filler or a random-search assignment script.
+The solver computes exact optima for the implemented structured objectives,
+writes inspectable report sidecars, and can compare multiple exact objective
+candidates deterministically.
+
+Representative capabilities:
+
+| Feature | What it demonstrates |
+| --- | --- |
+| Exact objective solving | Uses min-cost flow, threshold search, and exact rational comparisons instead of heuristic acceptance. |
+| Report sidecars | Writes metrics, per-lab fill rates, per-student ranks, outside-preference cases, and reason labels. |
+| Portfolio mode | Runs several exact objective candidates on the same input and records the selected candidate. |
+| Profile counters | Exposes solver calls, exact comparison counts, candidate counts, and phase timings. |
+| Reproducible benchmarks | `make benchmark` regenerates representative benchmark data. |
+| Safe packaging | `make source-archive` builds a clean public source archive from Git-tracked files only. |
+
+Representative benchmark results from `docs/benchmark_results.tsv`:
+
+| Case | Wall time | Avg rank | Rank stddev | Max rank | Avg fill | Min fill | Outside |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `uniform_256x1024_rubric` | 2.121s | 1.308 | 0.510 | 3 | 0.873 | 0.111 | 0 |
+| `popular_256x1024_rubric` | 2.411s | 2.861 | 1.747 | 8 | 0.869 | 0.111 | 0 |
+| `popular_256x1024_fair` | 0.810s | 2.939 | 1.644 | 6 | 0.867 | 0.111 | 0 |
+| `popular_256x1024_weighted_evaluation` | 4.026s | 2.882 | 1.672 | 8 | 0.868 | 0.111 | 0 |
+| `popular_128x512_portfolio_jobs4` | 0.553s | 2.803 | 1.599 | 6 | 0.871 | 0.143 | 0 |
+
+For longer command transcripts, report snippets, and benchmark summaries, see
+[`docs/SHOWCASE.md`](docs/SHOWCASE.md).  For planned exactness-preserving
+performance work, see [`docs/OPTIMIZATION_NOTES.md`](docs/OPTIMIZATION_NOTES.md).
+
+Tiny input/output example:
+
+`labs.txt`
+
+```text
+3
+A 2
+B 1
+C 1
+```
+
+`prefs.txt`
+
+```text
+4 2
+00001 A B
+00002 A C
+00003 B A
+00004 C A
+```
+
+```sh
+./assign_labs labs.txt prefs.txt out.txt --reports
+```
+
+`out.txt`
+
+```text
+4
+00001 A
+00002 A
+00003 B
+00004 C
+```
+
+Report sidecars then explain the result, for example:
+
+```text
+average_rank 1
+rank_stddev 0
+rank_max 1
+average_fill_rate 1
+minimum_fill_rate 1
+outside_preference_count 0
+reason_first_choice_selected 4
+```
+
 ## Scope of Exactness and Complexity
 
 For the fixed assignment model in this repository and for the objective selected
