@@ -47,6 +47,7 @@
 
 typedef struct ConstraintSet ConstraintSet;
 typedef struct RankCostModel RankCostModel;
+typedef struct TargetConstraints TargetConstraints;
 
 typedef enum {
     ID_POLICY_ASSIGNMENT5,
@@ -83,6 +84,7 @@ typedef struct {
     const ConstraintSet *constraints;
     const int *base_assignment;
     const RankCostModel *rank_cost_model;
+    const TargetConstraints *targets;
     long long change_penalty;
 } ProblemData;
 
@@ -182,6 +184,21 @@ typedef struct {
     int size;
     int capacity;
 } RatioList;
+
+struct TargetConstraints {
+    int has_average_rank_max;
+    RatioValue average_rank_max;
+    int has_rank_sum_max;
+    long long rank_sum_max;
+    int has_rank_square_max;
+    long long rank_square_max;
+    int has_max_rank_max;
+    int max_rank_max;
+    int has_minimum_fill_min;
+    RatioValue minimum_fill_min;
+    int has_outside_max;
+    int outside_max;
+};
 
 typedef struct {
     int *items;
@@ -348,9 +365,11 @@ typedef struct {
     ObjectiveMode objective_mode;
     int max_rank_slack;
     WeightedObjective weights;
+    TargetConstraints targets;
     RankCostModel rank_cost_model;
     const char *rank_costs_path;
     const char *weights_path;
+    const char *targets_path;
     const char *constraints_path;
     const char *base_assignment_path;
     const char *explain_student_id;
@@ -508,6 +527,7 @@ static char *cleanup_adjustment_report_output_path = NULL;
 static char *cleanup_portfolio_report_output_path = NULL;
 static char *cleanup_profile_output_path = NULL;
 static char *cleanup_explanation_report_output_path = NULL;
+static char *cleanup_target_status_output_path = NULL;
 static unsigned int temporary_file_counter = 0U;
 static SolverProfile *active_profile = NULL;
 
@@ -542,6 +562,15 @@ static NORETURN void fail_with_context_format_hint(const char *context,
 static void solver_profile_init(SolverProfile *profile);
 static void solver_profile_write(const char *profile_path,
                                  const SolverProfile *profile);
+static int target_constraints_are_empty(const TargetConstraints *targets);
+static int target_rank_upper_bound(const ProblemData *problem_data,
+                                   int base_upper_bound);
+static int target_minimum_count_for_lab(const ProblemData *problem_data,
+                                        int lab_index);
+static int ratio_compare_value(RatioValue left, RatioValue right);
+static int ceil_ratio_times_capacity(RatioValue ratio,
+                                     long long capacity_value,
+                                     int count_limit);
 
 static inline Cost cost_make(long long first, long long second, long long third)
 {
@@ -1446,6 +1475,9 @@ static void remove_cleanup_paths(void)
     if (cleanup_explanation_report_output_path != NULL) {
         (void)remove(cleanup_explanation_report_output_path);
     }
+    if (cleanup_target_status_output_path != NULL) {
+        (void)remove(cleanup_target_status_output_path);
+    }
 }
 
 static NORETURN void fail_with_message(const char *message)
@@ -1529,6 +1561,13 @@ static void print_help(const char *program_name)
     printf("  --max-rank-slack N       guarded mode rank slack from minimum feasible max-rank\n");
     printf("  --rank-costs FILE        rank cost table for satisfaction mode\n");
     printf("  --weights FILE           weighted-exact weight preset file\n");
+    printf("  --targets FILE           hard target constraint file\n");
+    printf("  --require-average-rank-at-most X  require average assigned rank <= X\n");
+    printf("  --require-rank-sum-at-most N      require rank_sum <= N\n");
+    printf("  --require-rank-square-at-most N   require rank_square_sum <= N\n");
+    printf("  --require-max-rank-at-most K      require max assigned rank <= K\n");
+    printf("  --require-minimum-fill-at-least X require minimum fill rate >= X or percent\n");
+    printf("  --require-outside-at-most N       require outside-preference count <= N (exactly supports 0)\n");
     printf("  --first-choice-gap N     satisfaction cost for rank 2, default 100\n");
     printf("  --rank-tail-linear N     linear tail cost after rank 2, default 30\n");
     printf("  --rank-tail-quadratic N  quadratic tail cost after rank 2, default 5\n");
@@ -1839,6 +1878,201 @@ static int parse_int_range(const char *text,
                                                    (long long)maximum_value,
                                                    context);
     return (int)parsed_value;
+}
+
+static unsigned long long gcd_nonzero_u64(unsigned long long left,
+                                          unsigned long long right)
+{
+    while (right != 0ULL) {
+        unsigned long long remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    return left == 0ULL ? 1ULL : left;
+}
+
+static RatioValue ratio_value_reduce(RatioValue ratio)
+{
+    unsigned long long divisor;
+    if (ratio.denominator <= 0LL || ratio.numerator < 0LL) {
+        fail_with_context("ratio", "invalid ratio value");
+    }
+    if (ratio.numerator == 0LL) {
+        ratio.denominator = 1LL;
+        return ratio;
+    }
+    divisor = gcd_nonzero_u64((unsigned long long)ratio.numerator,
+                              (unsigned long long)ratio.denominator);
+    ratio.numerator = (long long)((unsigned long long)ratio.numerator / divisor);
+    ratio.denominator = (long long)((unsigned long long)ratio.denominator / divisor);
+    return ratio;
+}
+
+static RatioValue parse_ratio_bound(const char *text, const char *context)
+{
+    const char *number_text = without_utf8_bom(text);
+    size_t length = strlen(number_text);
+    const char *slash_pointer;
+    int has_percent = 0;
+    int has_digit = 0;
+    int seen_decimal = 0;
+    long long numerator = 0LL;
+    long long denominator = 1LL;
+    size_t index_value;
+    RatioValue ratio;
+
+    if (length == 0U) {
+        fail_with_context(context, "invalid numeric target");
+    }
+    slash_pointer = strchr(number_text, '/');
+    if (slash_pointer != NULL) {
+        char *end_pointer;
+        long long numerator_value;
+        long long denominator_value;
+        if (strchr(slash_pointer + 1, '/') != NULL) {
+            fail_with_context(context, "invalid ratio target");
+        }
+        errno = 0;
+        numerator_value = strtoll(number_text, &end_pointer, 10);
+        if (errno != 0 || end_pointer != slash_pointer || numerator_value < 0LL) {
+            fail_with_context(context, "invalid ratio target numerator");
+        }
+        errno = 0;
+        denominator_value = strtoll(slash_pointer + 1, &end_pointer, 10);
+        if (errno != 0 || end_pointer == slash_pointer + 1 ||
+            *end_pointer != '\0' || denominator_value <= 0LL) {
+            fail_with_context(context, "invalid ratio target denominator");
+        }
+        ratio.numerator = numerator_value;
+        ratio.denominator = denominator_value;
+        return ratio_value_reduce(ratio);
+    }
+    if (number_text[length - 1U] == '%') {
+        has_percent = 1;
+        length--;
+        if (length == 0U) {
+            fail_with_context(context, "invalid percent target");
+        }
+    }
+
+    for (index_value = 0U; index_value < length; index_value++) {
+        unsigned char character = (unsigned char)number_text[index_value];
+        if (character == '.') {
+            if (seen_decimal) {
+                fail_with_context(context, "invalid decimal target");
+            }
+            seen_decimal = 1;
+            continue;
+        }
+        if (!isdigit(character)) {
+            fail_with_context(context, "invalid numeric target");
+        }
+        has_digit = 1;
+        if (numerator > (LLONG_MAX - (long long)(character - '0')) / 10LL) {
+            fail_with_context(context, "numeric target is too large");
+        }
+        numerator = numerator * 10LL + (long long)(character - '0');
+        if (seen_decimal) {
+            if (denominator > LLONG_MAX / 10LL) {
+                fail_with_context(context, "numeric target has too many decimal places");
+            }
+            denominator *= 10LL;
+        }
+    }
+    if (!has_digit) {
+        fail_with_context(context, "invalid numeric target");
+    }
+    if (has_percent) {
+        if (denominator > LLONG_MAX / 100LL) {
+            fail_with_context(context, "percent target is too precise");
+        }
+        denominator *= 100LL;
+    }
+    ratio.numerator = numerator;
+    ratio.denominator = denominator;
+    return ratio_value_reduce(ratio);
+}
+
+static void target_constraints_init(TargetConstraints *targets)
+{
+    memset(targets, 0, sizeof(*targets));
+    targets->average_rank_max.denominator = 1LL;
+    targets->minimum_fill_min.denominator = 1LL;
+}
+
+static int target_constraints_are_empty(const TargetConstraints *targets)
+{
+    if (targets == NULL) {
+        return 1;
+    }
+    return !targets->has_average_rank_max &&
+           !targets->has_rank_sum_max &&
+           !targets->has_rank_square_max &&
+           !targets->has_max_rank_max &&
+           !targets->has_minimum_fill_min &&
+           !targets->has_outside_max;
+}
+
+static void target_constraints_set_average_rank_max(TargetConstraints *targets,
+                                                    RatioValue bound)
+{
+    if (targets->has_average_rank_max &&
+        ratio_compare_value(bound, targets->average_rank_max) > 0) {
+        return;
+    }
+    targets->has_average_rank_max = 1;
+    targets->average_rank_max = ratio_value_reduce(bound);
+}
+
+static void target_constraints_set_minimum_fill_min(TargetConstraints *targets,
+                                                    RatioValue bound)
+{
+    if (targets->has_minimum_fill_min &&
+        ratio_compare_value(bound, targets->minimum_fill_min) < 0) {
+        return;
+    }
+    targets->has_minimum_fill_min = 1;
+    targets->minimum_fill_min = ratio_value_reduce(bound);
+}
+
+static void target_constraints_set_rank_sum_max(TargetConstraints *targets,
+                                                long long bound)
+{
+    if (targets->has_rank_sum_max && bound > targets->rank_sum_max) {
+        return;
+    }
+    targets->has_rank_sum_max = 1;
+    targets->rank_sum_max = bound;
+}
+
+static void target_constraints_set_rank_square_max(TargetConstraints *targets,
+                                                   long long bound)
+{
+    if (targets->has_rank_square_max && bound > targets->rank_square_max) {
+        return;
+    }
+    targets->has_rank_square_max = 1;
+    targets->rank_square_max = bound;
+}
+
+static void target_constraints_set_max_rank_max(TargetConstraints *targets,
+                                                int bound)
+{
+    if (targets->has_max_rank_max && bound > targets->max_rank_max) {
+        return;
+    }
+    targets->has_max_rank_max = 1;
+    targets->max_rank_max = bound;
+}
+
+static void target_constraints_set_outside_max(TargetConstraints *targets,
+                                               int bound)
+{
+    if (targets->has_outside_max && bound > targets->outside_max) {
+        return;
+    }
+    targets->has_outside_max = 1;
+    targets->outside_max = bound;
 }
 
 static int text_is_digits(const char *text)
@@ -3196,6 +3430,24 @@ static int int_list_last_index_at_most(const IntList *list, int value)
     return low_index - 1;
 }
 
+static int target_rank_upper_bound(const ProblemData *problem_data,
+                                   int base_upper_bound)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    int upper_bound = base_upper_bound;
+    if (targets == NULL) {
+        return upper_bound;
+    }
+    if (targets->has_max_rank_max && targets->max_rank_max < upper_bound) {
+        upper_bound = targets->max_rank_max;
+    }
+    if (targets->has_outside_max && targets->outside_max == 0 &&
+        problem_data->max_preferences < upper_bound) {
+        upper_bound = problem_data->max_preferences;
+    }
+    return upper_bound;
+}
+
 static int assignment_edge_allowed(const ProblemData *problem_data,
                                    int student_index,
                                    int lab_index,
@@ -3232,6 +3484,10 @@ static int all_students_have_identical_rank_rows(const ProblemData *problem_data
     if (problem_data->constraints != NULL ||
         (problem_data->base_assignment != NULL &&
          problem_data->change_penalty > 0LL)) {
+        return 0;
+    }
+    if (problem_data->targets != NULL &&
+        problem_data->targets->has_minimum_fill_min) {
         return 0;
     }
     for (student_index = 1;
@@ -3321,6 +3577,13 @@ static int has_feasible_assignment_with_minimum_counts(const ProblemData *proble
         int required_count = minimum_lab_counts == NULL ?
                              (problem_data->labs[lab_index].capacity_value > 0LL ? 1 : 0) :
                              minimum_lab_counts[lab_index];
+        if (minimum_lab_counts == NULL &&
+            problem_data->labs[lab_index].capacity_value > 0LL) {
+            int target_count = target_minimum_count_for_lab(problem_data, lab_index);
+            if (target_count > required_count) {
+                required_count = target_count;
+            }
+        }
         int upper_count = problem_data->labs[lab_index].graph_capacity;
         if (required_count < 0 || required_count > upper_count) {
             free(balance);
@@ -3360,15 +3623,28 @@ static int has_feasible_assignment(const ProblemData *problem_data, int max_rank
     return has_feasible_assignment_with_minimum_counts(problem_data, max_rank, NULL);
 }
 
-static int find_minimum_feasible_max_rank(const ProblemData *problem_data)
+static int find_minimum_feasible_max_rank_at_most(const ProblemData *problem_data,
+                                                  int q_upper_bound)
 {
     IntList candidates;
     int low_index;
     int high_index;
     int answer_rank;
 
+    q_upper_bound = target_rank_upper_bound(problem_data, q_upper_bound);
+    if (q_upper_bound < 1) {
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+    }
+
     if (all_students_have_identical_rank_rows(problem_data)) {
-        return minimum_feasible_max_rank_for_identical_rows(problem_data);
+        answer_rank = minimum_feasible_max_rank_for_identical_rows(problem_data);
+        if (answer_rank > q_upper_bound ||
+            !has_feasible_assignment(problem_data, q_upper_bound)) {
+            fail_with_context("target constraints",
+                              "解が存在しませんでした: no feasible assignment satisfies the rank target");
+        }
+        return answer_rank;
     }
 
     candidates = build_rank_threshold_candidates(problem_data);
@@ -3376,12 +3652,18 @@ static int find_minimum_feasible_max_rank(const ProblemData *problem_data)
         fail_with_context("rank threshold candidates", "no rank thresholds found");
     }
 
-    high_index = candidates.size - 1;
+    high_index = int_list_last_index_at_most(&candidates, q_upper_bound);
+    if (high_index < 0) {
+        int_list_free(&candidates);
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: no rank threshold candidate satisfies the target");
+    }
     answer_rank = candidates.items[high_index];
 
     if (!has_feasible_assignment(problem_data, answer_rank)) {
         int_list_free(&candidates);
-        fail_with_context("input", "no feasible assignment exists even with forced placements");
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: no feasible assignment satisfies the rank/fill targets");
     }
 
     low_index = 0;
@@ -3398,6 +3680,12 @@ static int find_minimum_feasible_max_rank(const ProblemData *problem_data)
 
     int_list_free(&candidates);
     return answer_rank;
+}
+
+static int find_minimum_feasible_max_rank(const ProblemData *problem_data)
+{
+    return find_minimum_feasible_max_rank_at_most(problem_data,
+                                                 problem_data->lab_count + 1);
 }
 
 static void mcf_list_push(McfEdgeList *list, McfEdge edge)
@@ -5476,6 +5764,13 @@ static int *build_base_minimum_counts(const ProblemData *problem_data)
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         if (problem_data->labs[lab_index].capacity_value > 0LL) {
             minimum_lab_counts[lab_index] = 1;
+            {
+                int target_count =
+                    target_minimum_count_for_lab(problem_data, lab_index);
+                if (target_count > minimum_lab_counts[lab_index]) {
+                    minimum_lab_counts[lab_index] = target_count;
+                }
+            }
         }
     }
     return minimum_lab_counts;
@@ -5660,6 +5955,131 @@ static int ceil_ratio_times_capacity(RatioValue ratio,
 #endif
 }
 
+static int target_minimum_count_for_lab(const ProblemData *problem_data,
+                                        int lab_index)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    long long capacity_value = problem_data->labs[lab_index].capacity_value;
+    if (targets == NULL || !targets->has_minimum_fill_min ||
+        capacity_value <= 0LL) {
+        return 0;
+    }
+    return ceil_ratio_times_capacity(targets->minimum_fill_min,
+                                     capacity_value,
+                                     problem_data->student_count);
+}
+
+static int floor_ratio_times_student_count(RatioValue ratio,
+                                           int student_count,
+                                           long long *result)
+{
+#if defined(__SIZEOF_INT128__)
+    __uint128_t product =
+        (__uint128_t)ratio.numerator * (__uint128_t)student_count;
+    __uint128_t quotient = product / (__uint128_t)ratio.denominator;
+    if (quotient > (__uint128_t)LLONG_MAX) {
+        return 0;
+    }
+    *result = (long long)quotient;
+    return 1;
+#else
+    long long product;
+    if (!multiply_nonnegative_ll_fits(ratio.numerator,
+                                      (long long)student_count,
+                                      LLONG_MAX,
+                                      &product)) {
+        return 0;
+    }
+    *result = product / ratio.denominator;
+    return 1;
+#endif
+}
+
+static int target_rank_sum_limit(const ProblemData *problem_data,
+                                 long long *limit_out)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    int has_limit = 0;
+    long long limit_value = LLONG_MAX / 4LL;
+    if (targets == NULL) {
+        return 0;
+    }
+    if (targets->has_rank_sum_max) {
+        limit_value = targets->rank_sum_max;
+        has_limit = 1;
+    }
+    if (targets->has_average_rank_max) {
+        long long average_limit;
+        if (!floor_ratio_times_student_count(targets->average_rank_max,
+                                             problem_data->student_count,
+                                             &average_limit)) {
+            fail_with_context("target constraints", "average-rank target is too large");
+        }
+        if (!has_limit || average_limit < limit_value) {
+            limit_value = average_limit;
+            has_limit = 1;
+        }
+    }
+    if (has_limit) {
+        *limit_out = limit_value;
+    }
+    return has_limit;
+}
+
+static int target_average_rank_limit(const ProblemData *problem_data,
+                                     long long *limit_out)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    if (targets == NULL || !targets->has_average_rank_max) {
+        return 0;
+    }
+    if (!floor_ratio_times_student_count(targets->average_rank_max,
+                                         problem_data->student_count,
+                                         limit_out)) {
+        fail_with_context("target constraints", "average-rank target is too large");
+    }
+    return 1;
+}
+
+static int rank_sum_satisfies_targets(const ProblemData *problem_data,
+                                      long long rank_sum)
+{
+    long long rank_sum_limit;
+    if (!target_rank_sum_limit(problem_data, &rank_sum_limit)) {
+        return 1;
+    }
+    return rank_sum <= rank_sum_limit;
+}
+
+static void validate_target_constraints_against_problem(
+    const ProblemData *problem_data)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    long long rank_sum_limit;
+    int lab_index;
+    int minimum_sum = 0;
+    if (targets == NULL || target_constraints_are_empty(targets)) {
+        return;
+    }
+    if (target_rank_sum_limit(problem_data, &rank_sum_limit) &&
+        rank_sum_limit < (long long)problem_data->student_count) {
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: average-rank/rank-sum target is below the theoretical minimum");
+    }
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        int required_count = target_minimum_count_for_lab(problem_data, lab_index);
+        if (required_count > problem_data->labs[lab_index].graph_capacity) {
+            fail_with_context("target constraints",
+                              "解が存在しませんでした: minimum-fill target exceeds a lab capacity");
+        }
+        minimum_sum += required_count;
+        if (minimum_sum > problem_data->student_count) {
+            fail_with_context("target constraints",
+                              "解が存在しませんでした: minimum-fill targets require more students than available");
+        }
+    }
+}
+
 static int build_minimum_counts_for_ratio(const ProblemData *problem_data,
                                           RatioValue ratio,
                                           int *minimum_lab_counts)
@@ -5676,6 +6096,13 @@ static int build_minimum_counts_for_ratio(const ProblemData *problem_data,
                                           problem_data->student_count);
             if (required_count < 1) {
                 required_count = 1;
+            }
+            {
+                int target_count =
+                    target_minimum_count_for_lab(problem_data, lab_index);
+                if (target_count > required_count) {
+                    required_count = target_count;
+                }
             }
             if (required_count > problem_data->labs[lab_index].graph_capacity) {
                 return 0;
@@ -5986,6 +6413,13 @@ static int identical_ratio_is_feasible(const ProblemData *problem_data,
                                           problem_data->student_count);
             if (required_count < 1) {
                 required_count = 1;
+            }
+            {
+                int target_count =
+                    target_minimum_count_for_lab(problem_data, lab_index);
+                if (target_count > required_count) {
+                    required_count = target_count;
+                }
             }
             if (required_count > problem_data->labs[lab_index].graph_capacity) {
                 feasible = 0;
@@ -6769,6 +7203,11 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
     int best_max_rank;
     int *assignment;
 
+    q_upper_bound = target_rank_upper_bound(problem_data, q_upper_bound);
+    if (q_upper_bound < 1) {
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+    }
     active_groups =
         build_student_groups(problem_data, q_upper_bound, STUDENT_GROUP_ACTIVE_RANK);
     active_group_pointer =
@@ -6788,7 +7227,8 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
     if (!optional_base_solution.feasible) {
         free_student_groups(&active_groups);
         free(base_minimum_counts);
-        fail_with_context("solver", "no feasible assignment exists under rank guard");
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: no feasible assignment satisfies the rank/fill targets");
     }
     base_solution = optional_base_solution.solution;
     base_solution_max_rank = max_rank_for_solution(problem_data, base_solution.assignment);
@@ -6856,6 +7296,83 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
     free_student_groups(&active_groups);
     free(base_minimum_counts);
     return assignment;
+}
+
+static int find_fair_max_rank_satisfying_rank_sum_targets(
+    const ProblemData *problem_data)
+{
+    long long rank_sum_limit;
+    IntList candidates;
+    StudentGroupCache group_cache;
+    int q_upper_bound;
+    int first_q_index;
+    int last_q_index;
+    int q_index;
+    int *base_minimum_counts;
+    int required_count;
+
+    if (!target_rank_sum_limit(problem_data, &rank_sum_limit)) {
+        return find_minimum_feasible_max_rank(problem_data);
+    }
+
+    q_upper_bound = target_rank_upper_bound(problem_data,
+                                           problem_data->lab_count + 1);
+    if (q_upper_bound < 1) {
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+    }
+    candidates = build_rank_threshold_candidates(problem_data);
+    first_q_index = int_list_first_index_at_least(&candidates, 1);
+    last_q_index = int_list_last_index_at_most(&candidates, q_upper_bound);
+    if (first_q_index > last_q_index) {
+        int_list_free(&candidates);
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: no rank threshold candidate satisfies the target");
+    }
+
+    base_minimum_counts = build_base_minimum_counts(problem_data);
+    required_count = sum_minimum_counts(problem_data, base_minimum_counts);
+    group_cache =
+        student_group_cache_create(candidates.size, STUDENT_GROUP_ACTIVE_RANK);
+
+    for (q_index = first_q_index; q_index <= last_q_index; q_index++) {
+        int q_limit = candidates.items[q_index];
+        const StudentGroups *active_group_pointer =
+            student_group_cache_get(&group_cache,
+                                    problem_data,
+                                    &candidates,
+                                    q_index);
+        OptionalSolutionResult candidate_solution =
+            try_solve_with_minimum_counts(problem_data,
+                                          q_limit,
+                                          base_minimum_counts,
+                                          0,
+                                          0,
+                                          NULL,
+                                          NULL,
+                                          NULL,
+                                          NULL,
+                                          NULL,
+                                          active_group_pointer);
+        int target_satisfied =
+            candidate_solution.feasible &&
+            candidate_solution.solution.total_cost.first == -(long long)required_count &&
+            candidate_solution.solution.total_cost.second <= rank_sum_limit;
+        free_solution_result(&candidate_solution.solution);
+        if (target_satisfied) {
+            student_group_cache_free(&group_cache);
+            free(base_minimum_counts);
+            int_list_free(&candidates);
+            return q_limit;
+        }
+    }
+
+    student_group_cache_free(&group_cache);
+    free(base_minimum_counts);
+    int_list_free(&candidates);
+    fail_with_context("target constraints",
+                      "解が存在しませんでした: no feasible assignment satisfies the average-rank/rank-sum target");
+    return 0;
 }
 
 static long long max_rank_for_solution(const ProblemData *problem_data,
@@ -6994,11 +7511,13 @@ static int *solve_weighted_exact_integer_only_problem(
     long long best_score = 0LL;
     int best_score_is_set = 0;
     int q_start = weights->max_rank == 0LL ?
-                  problem_data->lab_count + 1 :
+                  target_rank_upper_bound(problem_data, problem_data->lab_count + 1) :
                   find_minimum_feasible_max_rank(problem_data);
     int first_q_index = int_list_first_index_at_least(&rank_candidates, q_start);
     int last_q_index =
-        int_list_last_index_at_most(&rank_candidates, problem_data->lab_count + 1);
+        int_list_last_index_at_most(
+            &rank_candidates,
+            target_rank_upper_bound(problem_data, problem_data->lab_count + 1));
     int q_index;
 
     if (first_q_index > last_q_index) {
@@ -7101,9 +7620,13 @@ static WeightedObjective fill_focused_weighted_objective(void)
 static int *solve_convex_fill_problem(const ProblemData *problem_data)
 {
     int *base_minimum_counts = build_base_minimum_counts(problem_data);
-    int max_rank = problem_data->lab_count + 1;
+    int max_rank = target_rank_upper_bound(problem_data, problem_data->lab_count + 1);
     ConvexFillContext convex_fill_context =
         convex_fill_context_create(problem_data);
+    if (max_rank < 1) {
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+    }
     StudentGroups active_groups =
         build_student_groups(problem_data, max_rank, STUDENT_GROUP_ACTIVE_RANK);
     const StudentGroups *active_group_pointer =
@@ -7954,15 +8477,23 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
     int first_q_index;
     int last_q_index;
     int q_start;
-    int q_end = problem_data->lab_count + 1;
+    int q_end = target_rank_upper_bound(problem_data, problem_data->lab_count + 1);
     long long weighted_grid_size;
     WeightedSearchBoxHeap search_boxes;
     WeightedRelaxedCornerCache relaxed_corner_cache;
     WeightedStudentGroupCache student_group_cache;
 
     q_start = active_weights->max_rank == 0LL ?
-                  problem_data->lab_count + 1 :
+                  q_end :
                   find_minimum_feasible_max_rank(problem_data);
+    if (q_end < 1) {
+        int_list_free(&rank_candidates);
+        minimum_count_candidate_list_free(&minimum_candidates);
+        weighted_average_fast_path_free(&average_fast_path);
+        exact_average_context_free(&score_context);
+        fail_with_context("target constraints",
+                          "解が存在しませんでした: max-rank target leaves no allowable rank");
+    }
 
     first_q_index = int_list_first_index_at_least(&rank_candidates, q_start);
     last_q_index = int_list_last_index_at_most(&rank_candidates, q_end);
@@ -8187,7 +8718,8 @@ static int *solve_assignment_for_mode(const ProblemData *problem_data,
         return solve_weighted_exact_problem(problem_data, &weights);
     }
     if (objective_mode == OBJECTIVE_FAIR) {
-        int best_max_rank = find_minimum_feasible_max_rank(problem_data);
+        int best_max_rank =
+            find_fair_max_rank_satisfying_rank_sum_targets(problem_data);
         return solve_problem(problem_data, best_max_rank);
     }
     if (objective_mode == OBJECTIVE_SATISFACTION) {
@@ -8203,7 +8735,8 @@ static int *solve_assignment_for_mode(const ProblemData *problem_data,
                                         NULL);
     }
     if (objective_mode == OBJECTIVE_GUARDED) {
-        int minimum_max_rank = find_minimum_feasible_max_rank(problem_data);
+        int minimum_max_rank =
+            find_fair_max_rank_satisfying_rank_sum_targets(problem_data);
         int guarded_max_rank = minimum_max_rank + options->max_rank_slack;
         if (guarded_max_rank < minimum_max_rank ||
             guarded_max_rank > problem_data->lab_count + 1) {
@@ -8442,6 +8975,21 @@ static char *profile_output_path_for(const char *output_file_path)
     return profile_path;
 }
 
+static char *target_status_output_path_for(const char *output_file_path)
+{
+    const char *suffix = ".target_status.tsv";
+    size_t output_length = strlen(output_file_path);
+    size_t suffix_length = strlen(suffix);
+    char *target_status_path;
+    if (output_length > (size_t)-1 - suffix_length - 1U) {
+        fail_with_context("target status output path", "path is too long");
+    }
+    target_status_path = checked_malloc(output_length + suffix_length + 1U);
+    memcpy(target_status_path, output_file_path, output_length);
+    memcpy(target_status_path + output_length, suffix, suffix_length + 1U);
+    return target_status_path;
+}
+
 static char *explanation_output_path_for(const char *output_file_path)
 {
     const char *suffix = ".explain.tsv";
@@ -8469,6 +9017,7 @@ static void print_success_summary(const char *output_file_path,
     char *profile_path = NULL;
     char *explanation_path = NULL;
     char *adjustment_path = NULL;
+    char *target_status_path = NULL;
 
     if (options->quiet ||
         !(options->write_reports ||
@@ -8476,7 +9025,8 @@ static void print_success_summary(const char *output_file_path,
           options->portfolio_mode ||
           options->explain_student_id != NULL ||
           options->try_lock_text != NULL ||
-          options->base_assignment_path != NULL)) {
+          options->base_assignment_path != NULL ||
+          !target_constraints_are_empty(&options->targets))) {
         return;
     }
 
@@ -8493,6 +9043,10 @@ static void print_success_summary(const char *output_file_path,
                student_report_path,
                outside_report_path,
                reasons_report_path);
+        if (!target_constraints_are_empty(&options->targets)) {
+            target_status_path = target_status_output_path_for(output_file_path);
+            printf("target_status=%s\n", target_status_path);
+        }
     }
     if (options->portfolio_mode) {
         portfolio_path = portfolio_report_output_path_for(output_file_path);
@@ -8519,6 +9073,7 @@ static void print_success_summary(const char *output_file_path,
     free(profile_path);
     free(explanation_path);
     free(adjustment_path);
+    free(target_status_path);
 }
 
 static char *portfolio_assignment_output_path_for(const char *output_file_path,
@@ -8560,6 +9115,7 @@ static void remove_portfolio_candidate_outputs(const char *candidate_output_path
         portfolio_report_output_path_for(candidate_output_path);
     char *profile_path = profile_output_path_for(candidate_output_path);
     char *explanation_path = explanation_output_path_for(candidate_output_path);
+    char *target_status_path = target_status_output_path_for(candidate_output_path);
 
     remove_file_if_present(metrics_path);
     remove_file_if_present(lab_report_path);
@@ -8570,6 +9126,7 @@ static void remove_portfolio_candidate_outputs(const char *candidate_output_path
     remove_file_if_present(portfolio_report_path);
     remove_file_if_present(profile_path);
     remove_file_if_present(explanation_path);
+    remove_file_if_present(target_status_path);
     remove_file_if_present(candidate_output_path);
 
     free(metrics_path);
@@ -8581,6 +9138,7 @@ static void remove_portfolio_candidate_outputs(const char *candidate_output_path
     free(portfolio_report_path);
     free(profile_path);
     free(explanation_path);
+    free(target_status_path);
 }
 
 static char *temporary_output_path_for(const char *output_file_path)
@@ -8733,6 +9291,7 @@ static void reject_report_paths_equal_to_input_paths(const char *lab_file_path,
                                                      const char *preference_file_path,
                                                      const char *rank_costs_path,
                                                      const char *weights_path,
+                                                     const char *targets_path,
                                                      const char *constraints_path,
                                                      const char *base_assignment_path,
                                                      const char *output_file_path,
@@ -8747,6 +9306,7 @@ static void reject_report_paths_equal_to_input_paths(const char *lab_file_path,
     char *portfolio_report_output_path = portfolio_report_output_path_for(output_file_path);
     char *profile_output_path = profile_output_path_for(output_file_path);
     char *explanation_output_path = explanation_output_path_for(output_file_path);
+    char *target_status_output_path = target_status_output_path_for(output_file_path);
 #define REJECT_OPTIONAL_REPORT_INPUT(context_text, path_value, input_text) \
     do { \
         reject_path_equal_to_named_optional_input_path((context_text), \
@@ -8786,6 +9346,10 @@ static void reject_report_paths_equal_to_input_paths(const char *lab_file_path,
         reject_path_equal_to_named_optional_input_path((context_text), \
                                                        (path_value), \
                                                        explanation_output_path, \
+                                                       (input_text)); \
+        reject_path_equal_to_named_optional_input_path((context_text), \
+                                                       (path_value), \
+                                                       target_status_output_path, \
                                                        (input_text)); \
     } while (0)
 
@@ -8854,9 +9418,19 @@ static void reject_report_paths_equal_to_input_paths(const char *lab_file_path,
     reject_path_equal_to_optional_input_path("explanation output path",
                                              rank_costs_path,
                                              explanation_output_path);
+    reject_path_equal_to_input_path("target status output path",
+                                    lab_file_path,
+                                    preference_file_path,
+                                    target_status_output_path);
+    reject_path_equal_to_optional_input_path("target status output path",
+                                             rank_costs_path,
+                                             target_status_output_path);
     REJECT_OPTIONAL_REPORT_INPUT("report output path",
                                  weights_path,
                                  "weights input file path");
+    REJECT_OPTIONAL_REPORT_INPUT("report output path",
+                                 targets_path,
+                                 "targets input file path");
     REJECT_OPTIONAL_REPORT_INPUT("report output path",
                                  constraints_path,
                                  "constraints input file path");
@@ -8874,6 +9448,7 @@ static void reject_report_paths_equal_to_input_paths(const char *lab_file_path,
     free(portfolio_report_output_path);
     free(profile_output_path);
     free(explanation_output_path);
+    free(target_status_output_path);
 }
 
 static void reject_portfolio_assignment_paths_equal_to_input_paths(
@@ -8881,6 +9456,7 @@ static void reject_portfolio_assignment_paths_equal_to_input_paths(
     const char *preference_file_path,
     const char *rank_costs_path,
     const char *weights_path,
+    const char *targets_path,
     const char *constraints_path,
     const char *base_assignment_path,
     const char *output_file_path,
@@ -8917,6 +9493,11 @@ static void reject_portfolio_assignment_paths_equal_to_input_paths(
             weights_path,
             candidate_path,
             "weights input file path");
+        reject_path_equal_to_named_optional_input_path(
+            "portfolio assignment output path",
+            targets_path,
+            candidate_path,
+            "targets input file path");
         reject_path_equal_to_named_optional_input_path(
             "portfolio assignment output path",
             constraints_path,
@@ -8979,6 +9560,281 @@ static int labs_at_minimum_fill_rate_count(const ProblemData *problem_data,
     return lab_count_at_minimum;
 }
 
+static int target_constraints_count(const TargetConstraints *targets)
+{
+    int count = 0;
+    if (targets->has_average_rank_max) {
+        count++;
+    }
+    if (targets->has_rank_sum_max) {
+        count++;
+    }
+    if (targets->has_rank_square_max) {
+        count++;
+    }
+    if (targets->has_max_rank_max) {
+        count++;
+    }
+    if (targets->has_minimum_fill_min) {
+        count++;
+    }
+    if (targets->has_outside_max) {
+        count++;
+    }
+    return count;
+}
+
+static int target_minimum_fill_satisfied(const ProblemData *problem_data,
+                                         const EvaluationMetrics *metrics)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    int lab_index;
+    if (targets == NULL || !targets->has_minimum_fill_min) {
+        return 1;
+    }
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        int required_count = target_minimum_count_for_lab(problem_data, lab_index);
+        if (metrics->lab_counts[lab_index] < required_count) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int required_targets_are_satisfied(const ProblemData *problem_data,
+                                          const int *assignment,
+                                          const EvaluationMetrics *metrics)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    if (targets == NULL || target_constraints_are_empty(targets)) {
+        return 1;
+    }
+    if (!rank_sum_satisfies_targets(problem_data, metrics->rank_sum)) {
+        return 0;
+    }
+    if (targets->has_rank_square_max &&
+        metrics->rank_square_sum > targets->rank_square_max) {
+        return 0;
+    }
+    if (targets->has_max_rank_max && metrics->max_rank > targets->max_rank_max) {
+        return 0;
+    }
+    if (!target_minimum_fill_satisfied(problem_data, metrics)) {
+        return 0;
+    }
+    if (targets->has_outside_max &&
+        outside_preference_count_for_assignment(problem_data, assignment) >
+            targets->outside_max) {
+        return 0;
+    }
+    return 1;
+}
+
+static int target_constraints_pass_count(const ProblemData *problem_data,
+                                         const int *assignment,
+                                         const EvaluationMetrics *metrics)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    int pass_count = 0;
+    long long rank_sum_limit = 0LL;
+    if (targets == NULL) {
+        return 0;
+    }
+    if (targets->has_average_rank_max &&
+        target_average_rank_limit(problem_data, &rank_sum_limit) &&
+        metrics->rank_sum <= rank_sum_limit) {
+        pass_count++;
+    }
+    if (targets->has_rank_sum_max && metrics->rank_sum <= targets->rank_sum_max) {
+        pass_count++;
+    }
+    if (targets->has_rank_square_max &&
+        metrics->rank_square_sum <= targets->rank_square_max) {
+        pass_count++;
+    }
+    if (targets->has_max_rank_max && metrics->max_rank <= targets->max_rank_max) {
+        pass_count++;
+    }
+    if (targets->has_minimum_fill_min &&
+        target_minimum_fill_satisfied(problem_data, metrics)) {
+        pass_count++;
+    }
+    if (targets->has_outside_max &&
+        outside_preference_count_for_assignment(problem_data, assignment) <=
+            targets->outside_max) {
+        pass_count++;
+    }
+    return pass_count;
+}
+
+static void write_target_status_row(FILE *target_file,
+                                    const char *target_name,
+                                    const char *operator_text,
+                                    const char *required_text,
+                                    const char *actual_text,
+                                    int passed,
+                                    long double margin,
+                                    const char *context)
+{
+    if (fprintf(target_file,
+                "%s\t%s\t%s\t%s\t%s\t%.17Lg\n",
+                target_name,
+                operator_text,
+                required_text,
+                actual_text,
+                passed ? "pass" : "fail",
+                margin) < 0) {
+        fail_with_context(context, "write failed");
+    }
+}
+
+static void write_target_status_file(const char *target_status_path,
+                                     const ProblemData *problem_data,
+                                     const int *assignment,
+                                     const EvaluationMetrics *metrics)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    char *temporary_path;
+    FILE *target_file;
+    int outside_count;
+    if (targets == NULL || target_constraints_are_empty(targets)) {
+        return;
+    }
+
+    temporary_path = temporary_output_path_for(target_status_path);
+    cleanup_target_status_output_path = temporary_path;
+    target_file = fopen(temporary_path, "w");
+    if (target_file == NULL) {
+        fail_with_context(target_status_path,
+                          "cannot open temporary target status output file");
+    }
+    if (fprintf(target_file,
+                "target\toperator\trequired\tactual\tstatus\tmargin\n") < 0) {
+        fclose(target_file);
+        fail_with_context(target_status_path, "write failed");
+    }
+
+    outside_count = outside_preference_count_for_assignment(problem_data, assignment);
+
+    if (targets->has_average_rank_max) {
+        char required_text[64];
+        char actual_text[64];
+        long long rank_sum_limit;
+        int passed;
+        snprintf(required_text,
+                 sizeof(required_text),
+                 "%.17Lg",
+                 (long double)targets->average_rank_max.numerator /
+                     (long double)targets->average_rank_max.denominator);
+        snprintf(actual_text, sizeof(actual_text), "%.17Lg", metrics->average_rank);
+        (void)target_average_rank_limit(problem_data, &rank_sum_limit);
+        passed = metrics->rank_sum <= rank_sum_limit;
+        write_target_status_row(target_file,
+                                "average_rank",
+                                "<=",
+                                required_text,
+                                actual_text,
+                                passed,
+                                ((long double)rank_sum_limit -
+                                 (long double)metrics->rank_sum) /
+                                    (long double)problem_data->student_count,
+                                target_status_path);
+    }
+    if (targets->has_rank_sum_max) {
+        char required_text[64];
+        char actual_text[64];
+        snprintf(required_text, sizeof(required_text), "%lld", targets->rank_sum_max);
+        snprintf(actual_text, sizeof(actual_text), "%lld", metrics->rank_sum);
+        write_target_status_row(target_file,
+                                "rank_sum",
+                                "<=",
+                                required_text,
+                                actual_text,
+                                metrics->rank_sum <= targets->rank_sum_max,
+                                (long double)targets->rank_sum_max -
+                                    (long double)metrics->rank_sum,
+                                target_status_path);
+    }
+    if (targets->has_rank_square_max) {
+        char required_text[64];
+        char actual_text[64];
+        snprintf(required_text,
+                 sizeof(required_text),
+                 "%lld",
+                 targets->rank_square_max);
+        snprintf(actual_text, sizeof(actual_text), "%lld", metrics->rank_square_sum);
+        write_target_status_row(target_file,
+                                "rank_square_sum",
+                                "<=",
+                                required_text,
+                                actual_text,
+                                metrics->rank_square_sum <= targets->rank_square_max,
+                                (long double)targets->rank_square_max -
+                                    (long double)metrics->rank_square_sum,
+                                target_status_path);
+    }
+    if (targets->has_max_rank_max) {
+        char required_text[64];
+        char actual_text[64];
+        snprintf(required_text, sizeof(required_text), "%d", targets->max_rank_max);
+        snprintf(actual_text, sizeof(actual_text), "%d", metrics->max_rank);
+        write_target_status_row(target_file,
+                                "max_rank",
+                                "<=",
+                                required_text,
+                                actual_text,
+                                metrics->max_rank <= targets->max_rank_max,
+                                (long double)targets->max_rank_max -
+                                    (long double)metrics->max_rank,
+                                target_status_path);
+    }
+    if (targets->has_minimum_fill_min) {
+        char required_text[64];
+        char actual_text[64];
+        snprintf(required_text,
+                 sizeof(required_text),
+                 "%.17Lg",
+                 (long double)targets->minimum_fill_min.numerator /
+                     (long double)targets->minimum_fill_min.denominator);
+        snprintf(actual_text,
+                 sizeof(actual_text),
+                 "%.17Lg",
+                 metrics->minimum_fill_rate);
+        write_target_status_row(target_file,
+                                "minimum_fill_rate",
+                                ">=",
+                                required_text,
+                                actual_text,
+                                target_minimum_fill_satisfied(problem_data, metrics),
+                                metrics->minimum_fill_rate -
+                                    ((long double)targets->minimum_fill_min.numerator /
+                                     (long double)targets->minimum_fill_min.denominator),
+                                target_status_path);
+    }
+    if (targets->has_outside_max) {
+        char required_text[64];
+        char actual_text[64];
+        snprintf(required_text, sizeof(required_text), "%d", targets->outside_max);
+        snprintf(actual_text, sizeof(actual_text), "%d", outside_count);
+        write_target_status_row(target_file,
+                                "outside_preference_count",
+                                "<=",
+                                required_text,
+                                actual_text,
+                                outside_count <= targets->outside_max,
+                                (long double)targets->outside_max -
+                                    (long double)outside_count,
+                                target_status_path);
+    }
+
+    if (fclose(target_file) != 0) {
+        fail_with_context(target_status_path, "close failed");
+    }
+    replace_output_file(temporary_path, target_status_path, target_status_path);
+    cleanup_target_status_output_path = NULL;
+    free(temporary_path);
+}
+
 static void write_assignment_file(const char *output_file_path,
                                   const ProblemData *problem_data,
                                   const int *assignment)
@@ -9030,6 +9886,14 @@ static void write_metrics_file(const char *metrics_path,
         outside_preference_count_for_assignment(problem_data, assignment);
     int labs_at_minimum =
         labs_at_minimum_fill_rate_count(problem_data, metrics);
+    int target_count =
+        problem_data->targets == NULL ?
+        0 :
+        target_constraints_count(problem_data->targets);
+    int target_pass_count =
+        problem_data->targets == NULL ?
+        0 :
+        target_constraints_pass_count(problem_data, assignment, metrics);
     int reason_first_choice_selected = 0;
     int reason_first_choice_full = 0;
     int reason_minimum_occupancy = 0;
@@ -9096,6 +9960,11 @@ static void write_metrics_file(const char *metrics_path,
         fprintf(metrics_file, "fill_rate_minimum %.17Lg\n", metrics->minimum_fill_rate) < 0 ||
         fprintf(metrics_file, "outside_preference_count %d\n", outside_count) < 0 ||
         fprintf(metrics_file, "labs_at_minimum_fill_rate %d\n", labs_at_minimum) < 0 ||
+        fprintf(metrics_file, "target_count %d\n", target_count) < 0 ||
+        fprintf(metrics_file, "target_pass_count %d\n", target_pass_count) < 0 ||
+        fprintf(metrics_file,
+                "target_all_passed %d\n",
+                target_count == target_pass_count ? 1 : 0) < 0 ||
         fprintf(metrics_file,
                 "reason_first_choice_selected %d\n",
                 reason_first_choice_selected) < 0 ||
@@ -9734,6 +10603,20 @@ static char *format_int_argument(int value)
     int length = snprintf(buffer, sizeof(buffer), "%d", value);
     if (length < 0 || (size_t)length >= sizeof(buffer)) {
         fail_with_context("parallel portfolio", "integer formatting failed");
+    }
+    return duplicate_text(buffer);
+}
+
+static char *format_ratio_argument(RatioValue value)
+{
+    char buffer[128];
+    int length = snprintf(buffer,
+                          sizeof(buffer),
+                          "%lld/%lld",
+                          value.numerator,
+                          value.denominator);
+    if (length < 0 || (size_t)length >= sizeof(buffer)) {
+        fail_with_context("parallel portfolio", "ratio formatting failed");
     }
     return duplicate_text(buffer);
 }
@@ -10562,6 +11445,34 @@ static int spawn_portfolio_child(const ProgramOptions *options,
         ADD_LITERAL("--rank-costs");
         ADD_LITERAL(options->rank_costs_path);
     }
+    if (options->targets_path != NULL) {
+        ADD_LITERAL("--targets");
+        ADD_LITERAL(options->targets_path);
+    }
+    if (options->targets.has_average_rank_max) {
+        ADD_LITERAL("--require-average-rank-at-most");
+        ADD_ALLOCATED(format_ratio_argument(options->targets.average_rank_max));
+    }
+    if (options->targets.has_rank_sum_max) {
+        ADD_LITERAL("--require-rank-sum-at-most");
+        ADD_ALLOCATED(format_long_long_argument(options->targets.rank_sum_max));
+    }
+    if (options->targets.has_rank_square_max) {
+        ADD_LITERAL("--require-rank-square-at-most");
+        ADD_ALLOCATED(format_long_long_argument(options->targets.rank_square_max));
+    }
+    if (options->targets.has_max_rank_max) {
+        ADD_LITERAL("--require-max-rank-at-most");
+        ADD_ALLOCATED(format_int_argument(options->targets.max_rank_max));
+    }
+    if (options->targets.has_minimum_fill_min) {
+        ADD_LITERAL("--require-minimum-fill-at-least");
+        ADD_ALLOCATED(format_ratio_argument(options->targets.minimum_fill_min));
+    }
+    if (options->targets.has_outside_max) {
+        ADD_LITERAL("--require-outside-at-most");
+        ADD_ALLOCATED(format_int_argument(options->targets.outside_max));
+    }
     ADD_LITERAL("--weight-rank-sum");
     ADD_ALLOCATED(format_long_long_argument(candidate->weights.rank_sum));
     ADD_LITERAL("--weight-rank-square");
@@ -10854,6 +11765,7 @@ static ProgramOptions default_program_options(void)
     rank_cost_model_init_default(&options.rank_cost_model);
     options.rank_costs_path = NULL;
     options.weights_path = NULL;
+    options.targets_path = NULL;
     options.constraints_path = NULL;
     options.base_assignment_path = NULL;
     options.explain_student_id = NULL;
@@ -10862,6 +11774,7 @@ static ProgramOptions default_program_options(void)
     options.lab_file_path = NULL;
     options.preference_file_path = NULL;
     options.change_penalty = 0LL;
+    target_constraints_init(&options.targets);
     return options;
 }
 
@@ -10943,6 +11856,102 @@ static void load_weights_file(const char *weights_path, WeightedObjective *objec
         } else {
             free(line);
             fail_with_context(weights_path, "unknown weight name");
+        }
+        free(line);
+    }
+    fast_input_close(&input);
+}
+
+static void load_targets_file(const char *targets_path, TargetConstraints *targets)
+{
+    FastInput input;
+    char *line;
+
+    fast_input_open(&input, targets_path);
+    while ((line = fast_read_line_dynamic(&input)) != NULL) {
+        Tokenizer tokenizer;
+        char *metric_text;
+        char *operator_text;
+        char *value_text;
+        tokenizer_init(&tokenizer, line);
+        metric_text = next_token(&tokenizer);
+        if (metric_text == NULL || metric_text[0] == '#') {
+            free(line);
+            continue;
+        }
+        operator_text = next_token(&tokenizer);
+        value_text = next_token(&tokenizer);
+        if (operator_text == NULL || value_text == NULL) {
+            free(line);
+            fail_with_context(targets_path,
+                              "target entry requires metric, operator, and value");
+        }
+        check_no_extra_token(&tokenizer, targets_path);
+
+        if (strcmp(metric_text, "average_rank") == 0 ||
+            strcmp(metric_text, "rank_average") == 0) {
+            if (strcmp(operator_text, "<=") != 0) {
+                free(line);
+                fail_with_context(targets_path,
+                                  "average_rank target requires <= operator");
+            }
+            target_constraints_set_average_rank_max(
+                targets,
+                parse_ratio_bound(value_text, targets_path));
+        } else if (strcmp(metric_text, "rank_sum") == 0) {
+            if (strcmp(operator_text, "<=") != 0) {
+                free(line);
+                fail_with_context(targets_path, "rank_sum target requires <= operator");
+            }
+            target_constraints_set_rank_sum_max(
+                targets,
+                parse_long_long_range(value_text, 0LL, LLONG_MAX / 4LL, targets_path));
+        } else if (strcmp(metric_text, "rank_square_sum") == 0) {
+            if (strcmp(operator_text, "<=") != 0) {
+                free(line);
+                fail_with_context(targets_path,
+                                  "rank_square_sum target requires <= operator");
+            }
+            target_constraints_set_rank_square_max(
+                targets,
+                parse_long_long_range(value_text, 0LL, LLONG_MAX / 4LL, targets_path));
+        } else if (strcmp(metric_text, "max_rank") == 0 ||
+                   strcmp(metric_text, "rank_max") == 0) {
+            if (strcmp(operator_text, "<=") != 0) {
+                free(line);
+                fail_with_context(targets_path, "max_rank target requires <= operator");
+            }
+            target_constraints_set_max_rank_max(
+                targets,
+                parse_int_range(value_text, 1, INT_MAX / 4, targets_path));
+        } else if (strcmp(metric_text, "minimum_fill_rate") == 0 ||
+                   strcmp(metric_text, "fill_rate_minimum") == 0) {
+            if (strcmp(operator_text, ">=") != 0) {
+                free(line);
+                fail_with_context(targets_path,
+                                  "minimum_fill_rate target requires >= operator");
+            }
+            target_constraints_set_minimum_fill_min(
+                targets,
+                parse_ratio_bound(value_text, targets_path));
+        } else if (strcmp(metric_text, "outside_preference_count") == 0 ||
+                   strcmp(metric_text, "outside") == 0) {
+            if (strcmp(operator_text, "<=") != 0) {
+                free(line);
+                fail_with_context(targets_path,
+                                  "outside_preference_count target requires <= operator");
+            }
+            target_constraints_set_outside_max(
+                targets,
+                parse_int_range(value_text, 0, INT_MAX / 4, targets_path));
+        } else if (strcmp(metric_text, "average_fill_rate") == 0 ||
+                   strcmp(metric_text, "fill_rate_average") == 0) {
+            free(line);
+            fail_with_context("target constraints",
+                              "average_fill_rate hard targets are not supported yet; use minimum_fill_rate or a report-only comparison");
+        } else {
+            free(line);
+            fail_with_context(targets_path, "unknown target metric");
         }
         free(line);
     }
@@ -11043,6 +12052,46 @@ static const char *require_option_value(int argc,
     return argv[*argument_index];
 }
 
+static int target_constraints_have_rank_sum_like_bound(
+    const TargetConstraints *targets)
+{
+    return targets->has_average_rank_max || targets->has_rank_sum_max;
+}
+
+static void validate_target_constraints_supported_for_run(
+    const ProgramOptions *options)
+{
+    const TargetConstraints *targets = &options->targets;
+    if (target_constraints_are_empty(targets)) {
+        return;
+    }
+    if (targets->has_rank_square_max) {
+        fail_with_context(
+            "target constraints",
+            "--require-rank-square-at-most is parsed but not supported as an exact hard target yet");
+    }
+    if (targets->has_outside_max && targets->outside_max != 0) {
+        fail_with_context(
+            "target constraints",
+            "only --require-outside-at-most 0 is currently supported exactly");
+    }
+    if (target_constraints_have_rank_sum_like_bound(targets)) {
+        if (options->portfolio_mode) {
+            fail_with_context(
+                "target constraints",
+                "average-rank/rank-sum hard targets are not supported with --portfolio; run a supported single objective");
+        }
+        if (options->objective_mode != OBJECTIVE_RUBRIC &&
+            options->objective_mode != OBJECTIVE_BALANCED &&
+            options->objective_mode != OBJECTIVE_GUARDED &&
+            options->objective_mode != OBJECTIVE_FAIR) {
+            fail_with_context(
+                "target constraints",
+                "average-rank/rank-sum hard targets are exact only for rubric, balanced, guarded, or fair");
+        }
+    }
+}
+
 static ProgramOptions parse_program_options(int argc, char **argv)
 {
     ProgramOptions options = default_program_options();
@@ -11114,6 +12163,66 @@ static ProgramOptions parse_program_options(int argc, char **argv)
             options.weights_path =
                 require_option_value(argc, argv, &argument_index, argument);
             load_weights_file(options.weights_path, &options.weights);
+        } else if (strcmp(argument, "--targets") == 0) {
+            options.targets_path =
+                require_option_value(argc, argv, &argument_index, argument);
+            load_targets_file(options.targets_path, &options.targets);
+        } else if (strcmp(argument, "--require-average-rank-at-most") == 0) {
+            target_constraints_set_average_rank_max(
+                &options.targets,
+                parse_ratio_bound(require_option_value(argc,
+                                                       argv,
+                                                       &argument_index,
+                                                       argument),
+                                  argument));
+        } else if (strcmp(argument, "--require-rank-sum-at-most") == 0) {
+            target_constraints_set_rank_sum_max(
+                &options.targets,
+                parse_long_long_range(require_option_value(argc,
+                                                           argv,
+                                                           &argument_index,
+                                                           argument),
+                                      0LL,
+                                      LLONG_MAX / 4LL,
+                                      argument));
+        } else if (strcmp(argument, "--require-rank-square-at-most") == 0) {
+            target_constraints_set_rank_square_max(
+                &options.targets,
+                parse_long_long_range(require_option_value(argc,
+                                                           argv,
+                                                           &argument_index,
+                                                           argument),
+                                      0LL,
+                                      LLONG_MAX / 4LL,
+                                      argument));
+        } else if (strcmp(argument, "--require-max-rank-at-most") == 0) {
+            target_constraints_set_max_rank_max(
+                &options.targets,
+                parse_int_range(require_option_value(argc,
+                                                     argv,
+                                                     &argument_index,
+                                                     argument),
+                                1,
+                                INT_MAX / 4,
+                                argument));
+        } else if (strcmp(argument, "--require-minimum-fill-at-least") == 0) {
+            target_constraints_set_minimum_fill_min(
+                &options.targets,
+                parse_ratio_bound(require_option_value(argc,
+                                                       argv,
+                                                       &argument_index,
+                                                       argument),
+                                  argument));
+        } else if (strcmp(argument, "--require-outside-at-most") == 0) {
+            target_constraints_set_outside_max(
+                &options.targets,
+                parse_int_range(require_option_value(argc,
+                                                     argv,
+                                                     &argument_index,
+                                                     argument),
+                                0,
+                                INT_MAX / 4,
+                                argument));
         } else if (strcmp(argument, "--first-choice-gap") == 0) {
             options.rank_cost_model.first_choice_gap =
                 parse_nonnegative_weight(require_option_value(argc,
@@ -11276,6 +12385,7 @@ int main(int argc, char **argv)
     options.program_path = argv[0];
     options.lab_file_path = argv[1];
     options.preference_file_path = argv[2];
+    validate_target_constraints_supported_for_run(&options);
     if (options.portfolio_mode &&
         (options.explain_student_id != NULL || options.try_lock_text != NULL)) {
         fail_with_context("--explain-student",
@@ -11294,6 +12404,10 @@ int main(int argc, char **argv)
                                                   argv[3],
                                                   "weights input file path");
     reject_path_equal_to_named_optional_input_path("output path",
+                                                  options.targets_path,
+                                                  argv[3],
+                                                  "targets input file path");
+    reject_path_equal_to_named_optional_input_path("output path",
                                                   options.constraints_path,
                                                   argv[3],
                                                   "constraints input file path");
@@ -11310,6 +12424,7 @@ int main(int argc, char **argv)
                                                 argv[2],
                                                 options.rank_costs_path,
                                                 options.weights_path,
+                                                options.targets_path,
                                                 options.constraints_path,
                                                 options.base_assignment_path,
                                                 argv[3],
@@ -11320,6 +12435,7 @@ int main(int argc, char **argv)
                                                               argv[2],
                                                               options.rank_costs_path,
                                                               options.weights_path,
+                                                              options.targets_path,
                                                               options.constraints_path,
                                                               options.base_assignment_path,
                                                               argv[3],
@@ -11337,12 +12453,14 @@ int main(int argc, char **argv)
         validate_rank_cost_model(&problem_data, &options.rank_cost_model);
     }
     problem_data.rank_cost_model = &options.rank_cost_model;
+    problem_data.targets = &options.targets;
     if (options.constraints_path != NULL) {
         read_constraints_file(options.constraints_path, &problem_data, &constraints);
         problem_data.constraints = &constraints;
         constraints_are_loaded = 1;
     }
     finalize_problem_capacities(&problem_data);
+    validate_target_constraints_against_problem(&problem_data);
     if (options.base_assignment_path != NULL) {
         base_assignment =
             read_assignment_file_as_base(options.base_assignment_path, &problem_data);
@@ -11375,6 +12493,25 @@ int main(int argc, char **argv)
         portfolio_solver_seconds >= 0.0L ?
         portfolio_solver_seconds :
         elapsed_cpu_seconds(solver_start_clock, solver_end_clock);
+    if (!target_constraints_are_empty(&options.targets)) {
+        EvaluationMetrics target_metrics =
+            compute_evaluation_metrics(&problem_data, assignment);
+        if (!required_targets_are_satisfied(&problem_data,
+                                            assignment,
+                                            &target_metrics)) {
+            free_evaluation_metrics(&target_metrics);
+            free(assignment);
+            free_problem_data(&problem_data);
+            rank_cost_model_free(&options.rank_cost_model);
+            if (constraints_are_loaded) {
+                constraint_set_free(&constraints);
+            }
+            free(base_assignment);
+            fail_with_context("target constraints",
+                              "解が存在しませんでした: selected objective has no feasible solution satisfying all required targets");
+        }
+        free_evaluation_metrics(&target_metrics);
+    }
     write_assignment_file(argv[3], &problem_data, assignment);
 
     if (options.explain_student_id != NULL || options.try_lock_text != NULL) {
@@ -11400,6 +12537,7 @@ int main(int argc, char **argv)
         char *outside_report_output_path = outside_report_output_path_for(argv[3]);
         char *reasons_report_output_path = reasons_report_output_path_for(argv[3]);
         char *adjustment_report_output_path = NULL;
+        char *target_status_output_path = NULL;
         clock_t before_metrics_clock;
         metrics.solver_cpu_seconds =
             portfolio_solver_seconds >= 0.0L ?
@@ -11423,6 +12561,13 @@ int main(int argc, char **argv)
                                   &problem_data,
                                   assignment,
                                   &metrics);
+        if (!target_constraints_are_empty(&options.targets)) {
+            target_status_output_path = target_status_output_path_for(argv[3]);
+            write_target_status_file(target_status_output_path,
+                                     &problem_data,
+                                     assignment,
+                                     &metrics);
+        }
         if (problem_data.base_assignment != NULL) {
             adjustment_report_output_path = adjustment_report_output_path_for(argv[3]);
             write_adjustment_report_file(adjustment_report_output_path,
@@ -11438,6 +12583,7 @@ int main(int argc, char **argv)
         free(outside_report_output_path);
         free(reasons_report_output_path);
         free(adjustment_report_output_path);
+        free(target_status_output_path);
     }
     report_end_clock = clock();
     profile.report_cpu_seconds = elapsed_cpu_seconds(report_start_clock, report_end_clock);

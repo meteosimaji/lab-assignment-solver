@@ -51,6 +51,10 @@ def metrics_path_for(output_path):
     return Path(str(output_path) + ".metrics.txt")
 
 
+def target_status_path_for(output_path):
+    return Path(str(output_path) + ".target_status.tsv")
+
+
 def lab_report_path_for(output_path):
     return Path(str(output_path) + ".by_lab.txt")
 
@@ -2113,6 +2117,189 @@ KAWADA-23215 C A
         "e23214@example.ac.jp",
         "学生_甲",
         "KAWADA-23215",
+    }
+    assert Path(str(output_path) + ".portfolio.tsv").exists()
+    assert not Path(str(output_path) + ".rubric.txt").exists()
+
+
+def test_require_average_rank_at_most_succeeds_and_reports(tmp_path):
+    lab_text = """\
+2
+A 2
+B 2
+"""
+    preference_text = """\
+3 1
+00001 A
+00002 A
+00003 A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "fair",
+            "--require-average-rank-at-most",
+            "2.0",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    assignments = validate_assignment(lab_text, preference_text, output_path)
+    metrics = read_metrics(output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert float(metrics["rank_average"]) <= 2.0
+    assert metrics["target_count"] == "1"
+    assert metrics["target_pass_count"] == "1"
+    assert metrics["target_all_passed"] == "1"
+    assert len(assignments) == 3
+    assert rows == [
+        {
+            "target": "average_rank",
+            "operator": "<=",
+            "required": "2",
+            "actual": metrics["rank_average"],
+            "status": "pass",
+            "margin": rows[0]["margin"],
+        }
+    ]
+
+
+def test_require_average_rank_at_most_reports_no_solution_without_output(tmp_path):
+    lab_text = """\
+2
+A 1
+B 1
+"""
+    preference_text = """\
+2 1
+00001 A
+00002 A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "fair",
+            "--require-average-rank-at-most",
+            "1.0",
+        ],
+    )
+    assert completed.returncode != 0
+    assert "解が存在しませんでした" in completed.stderr
+    assert not output_path.exists()
+    assert not target_status_path_for(output_path).exists()
+
+
+def test_require_average_rank_unsupported_objective_is_rejected(tmp_path):
+    lab_text = """\
+2
+A 1
+B 1
+"""
+    preference_text = """\
+2 2
+00001 A B
+00002 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "satisfaction",
+            "--require-average-rank-at-most",
+            "2.0",
+        ],
+    )
+    assert completed.returncode != 0
+    assert "average-rank/rank-sum hard targets are exact only" in completed.stderr
+    assert not output_path.exists()
+
+
+def test_targets_file_minimum_fill_and_outside_report(tmp_path):
+    lab_text = """\
+2
+A 3
+B 3
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 A B
+00004 A B
+"""
+    targets_path = tmp_path / "winning_line.txt"
+    write_text(
+        targets_path,
+        """\
+minimum_fill_rate >= 50%
+average_rank <= 2.0
+outside_preference_count <= 0
+""",
+    )
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "fair",
+            "--targets",
+            str(targets_path),
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    statuses = {row["target"]: row["status"] for row in rows}
+    assert statuses == {
+        "average_rank": "pass",
+        "minimum_fill_rate": "pass",
+        "outside_preference_count": "pass",
+    }
+    metrics = read_metrics(output_path)
+    assert metrics["target_count"] == "3"
+    assert metrics["target_all_passed"] == "1"
+
+
+def test_structural_targets_work_with_portfolio_summary_only(tmp_path):
+    lab_text = """\
+2
+A 3
+B 3
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 A B
+00004 A B
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--portfolio",
+            "--portfolio-summary-only",
+            "--require-minimum-fill-at-least",
+            "50%",
+            "--require-outside-at-most",
+            "0",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert {row["target"]: row["status"] for row in rows} == {
+        "minimum_fill_rate": "pass",
+        "outside_preference_count": "pass",
     }
     assert Path(str(output_path) + ".portfolio.tsv").exists()
     assert not Path(str(output_path) + ".rubric.txt").exists()

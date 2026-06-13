@@ -178,6 +178,14 @@ Recommended commands:
 # Worst-rank fairness oriented
 ./assign_labs labs.txt prefs.txt out.txt --objective fair --reports
 
+# Require a contest-style quality line, then optimize the selected objective
+./assign_labs labs.txt prefs.txt out.txt \
+  --objective fair \
+  --require-average-rank-at-most 2.0 \
+  --require-minimum-fill-at-least 25% \
+  --require-outside-at-most 0 \
+  --reports
+
 # Compare exact objective candidates
 ./assign_labs labs.txt prefs.txt out.txt \
   --portfolio \
@@ -206,6 +214,7 @@ Decision guide:
 | Default evaluation-style result | `--objective rubric --reports` | Optimizes average rank, rank spread, worst rank, then fill rates in a deterministic exact order. |
 | Student-facing satisfaction | `--objective satisfaction --rank-costs rank_costs/student_friendly.txt --reports` | Makes first-choice loss much more expensive without leaving min-cost flow. |
 | Worst-rank fairness | `--objective fair --reports` | Protects the maximum assigned rank first. |
+| Contest-style hard requirements | `--objective fair --require-average-rank-at-most 2.0 --require-minimum-fill-at-least 25% --require-outside-at-most 0 --reports` | Optimizes the selected exact objective only among assignments that satisfy every required target. |
 | Compare exact candidates | `--portfolio --portfolio-summary-only --reports` | Produces several exact candidates and a TSV recommendation table. |
 | Deep weighted study | `--objective weighted-exact --weights weights/evaluation_balance.txt --reports --profile` | Solves the full scalar weighted objective exactly and explains runtime through profile counters. |
 
@@ -252,6 +261,8 @@ This also creates:
 - `out.txt.explain.tsv`: only when `--explain-student` or `--try-lock` is used;
   exact counterfactual re-solve result and metric deltas for one requested
   student/lab lock.
+- `out.txt.target_status.tsv`: only when hard targets are used; one row per
+  `--require-*` target with required value, actual value, pass/fail, and margin.
 - `out.txt.adjustment_delta.tsv`: only when `--base-assignment` is used; compares
   the previous assignment with the adjusted assignment.
 - `out.txt.profile.tsv`: only when `--profile` is used; solver call counters,
@@ -273,11 +284,79 @@ are:
 - `portfolio.tsv`: candidate metrics, local recommendation components,
   `strengths`, `weaknesses`, `solver_seconds`, `recommended`,
   `tie_break_order`, and `selection_reason`.
+- `target_status.tsv`: `target`, `operator`, `required`, `actual`, `status`,
+  and `margin`.
 - `profile.tsv`: graph/flow call counters, threshold candidate counts,
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
   branch-and-bound counters, and phase CPU timings.  The legacy
   `weighted_score_comparisons` key is still written as an alias for
   `exact_path_cost_comparisons`.
+
+### Hard target constraints
+
+Hard targets restrict the feasible region before the selected objective is
+optimized.  They do not replace the objective.  For example, the command below
+means: first require average rank at most 2.0, no laboratory below 25% fill, and
+no outside-preference assignment; then find the best `fair` solution inside
+that target-satisfying region.
+
+```sh
+./assign_labs labs.txt prefs.txt out.txt \
+  --objective fair \
+  --require-average-rank-at-most 2.0 \
+  --require-minimum-fill-at-least 25% \
+  --require-outside-at-most 0 \
+  --reports
+```
+
+If no assignment satisfies all hard targets, the solver exits before writing the
+assignment file and reports:
+
+```text
+解が存在しませんでした
+```
+
+The same targets can be stored in a file:
+
+```text
+# targets/winning_line.txt
+average_rank <= 2.0
+minimum_fill_rate >= 25%
+outside_preference_count <= 0
+```
+
+```sh
+./assign_labs labs.txt prefs.txt out.txt \
+  --objective fair \
+  --targets targets/winning_line.txt \
+  --reports
+```
+
+Example `out.txt.target_status.tsv`:
+
+```tsv
+target	operator	required	actual	status	margin
+average_rank	<=	2	1.5	pass	0.5
+minimum_fill_rate	>=	0.25	0.5	pass	0.25
+outside_preference_count	<=	0	0	pass	0
+```
+
+Supported hard targets:
+
+```text
+--require-average-rank-at-most X
+--require-rank-sum-at-most N
+--require-max-rank-at-most K
+--require-minimum-fill-at-least X
+--require-outside-at-most 0
+--targets FILE
+```
+
+`X` can be an integer, decimal, fraction such as `1/4`, or percentage such as
+`25%`.  Structural targets such as maximum rank, minimum fill, and
+outside-at-most-zero are enforced directly by the flow model.  Average-rank and
+rank-sum hard targets are exact for `rubric`, `balanced`, `guarded`, and `fair`.
+Unsupported combinations are rejected instead of silently becoming heuristics.
 
 The default objective is `rubric`, aligned with common evaluation metrics:
 

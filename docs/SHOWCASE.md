@@ -127,7 +127,44 @@ balanced	1	0	1	0.50238095238095237	0.20000000000000001	0	no	not_selected
 guarded	1	0	1	0.50238095238095237	0.20000000000000001	0	no	not_selected
 ```
 
-## 4. Large Benchmark
+## 4. Hard Target Constraints
+
+Purpose:
+
+- Shows contest-style quality gates before objective optimization.
+- Confirms that the solver reports target pass/fail margins.
+- Keeps infeasible target sets explicit instead of writing a misleading result.
+
+`targets/winning_line.txt`
+
+```text
+average_rank <= 2.0
+minimum_fill_rate >= 25%
+outside_preference_count <= 0
+```
+
+Command:
+
+```sh
+./assign_labs labs.txt prefs.txt out.txt \
+  --objective fair \
+  --targets targets/winning_line.txt \
+  --reports
+```
+
+Target status snippet:
+
+```tsv
+target	operator	required	actual	status	margin
+average_rank	<=	2	1.5	pass	0.5
+minimum_fill_rate	>=	0.25	0.5	pass	0.25
+outside_preference_count	<=	0	0	pass	0
+```
+
+If no assignment satisfies all required targets, the solver exits before
+writing `out.txt` and includes `解が存在しませんでした` in the error message.
+
+## 5. Large Benchmark
 
 Purpose:
 
@@ -154,13 +191,13 @@ Representative rows from the current benchmark table:
 
 | Case | Wall time | Avg rank | Rank stddev | Max rank | Avg fill | Min fill | Exact path comparisons |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `uniform_256x1024_rubric` | 2.121s | 1.308 | 0.510 | 3 | 0.873 | 0.111 | 32,577,654 |
-| `popular_256x1024_rubric` | 2.411s | 2.861 | 1.747 | 8 | 0.869 | 0.111 | 40,797,870 |
-| `popular_256x1024_fair` | 0.810s | 2.939 | 1.644 | 6 | 0.867 | 0.111 | 18,186,622 |
-| `popular_256x1024_weighted_evaluation` | 4.026s | 2.882 | 1.672 | 8 | 0.868 | 0.111 | 0 |
-| `popular_128x512_portfolio_jobs4` | 0.553s | 2.803 | 1.599 | 6 | 0.871 | 0.143 | 64,084,680 |
+| `uniform_256x1024_rubric` | 1.975s | 1.308 | 0.510 | 3 | 0.873 | 0.111 | 32,577,654 |
+| `popular_256x1024_rubric` | 2.373s | 2.861 | 1.747 | 8 | 0.869 | 0.111 | 40,797,870 |
+| `popular_256x1024_fair` | 0.821s | 2.939 | 1.644 | 6 | 0.867 | 0.111 | 18,186,622 |
+| `popular_256x1024_weighted_evaluation` | 4.039s | 2.882 | 1.672 | 8 | 0.868 | 0.111 | 0 |
+| `popular_128x512_portfolio_jobs4` | 0.551s | 2.803 | 1.599 | 6 | 0.871 | 0.143 | 64,084,680 |
 
-## 5. Source Archive Hygiene
+## 6. Source Archive Hygiene
 
 Purpose:
 
