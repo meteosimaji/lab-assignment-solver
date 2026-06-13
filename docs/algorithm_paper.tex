@@ -1222,15 +1222,27 @@ together with polynomial threshold enumeration and exact rational comparison,
 to obtain a global optimum exactly.  This is not a claim of a universal
 polynomial-time optimizer for arbitrary assignment objectives.  With only
 black-box access to an arbitrary objective, exact optimization can require
-exponential search.  With a succinct unrestricted objective, the model can
-encode SAT: let each Boolean variable be represented by a student choosing one
-of two laboratories, and let the objective evaluate a Boolean formula under
-that induced truth assignment, scoring zero exactly on satisfying assignments.
-A polynomial-time exact optimizer for every such succinct objective would
-decide whether the optimum is zero and would therefore solve SAT in polynomial
-time, implying \(P=NP\).  The implemented solver deliberately avoids this
-claim by supporting only structured objective families with flow, threshold,
-rational-comparison, or separable-convex structure.
+exponential search: if some feasible assignment has not been queried, two
+objectives can agree on every queried assignment while making that unqueried
+assignment uniquely optimal in one case and not optimal in the other.
+
+With a succinct unrestricted objective, the model can encode SAT even while
+respecting the positive-capacity minimum-occupancy rule.  For each Boolean
+variable \(x_i\), create two laboratories \(T_i\) and \(F_i\), each with
+capacity 2.  Create one variable student \(X_i\) and two dummy students
+\(D_{i,T}\) and \(D_{i,F}\).  Define the objective \(F_\varphi\) to score zero
+exactly when \(D_{i,T}\) is assigned to \(T_i\), \(D_{i,F}\) is assigned to
+\(F_i\), \(X_i\) is assigned to one of \(T_i,F_i\), and the truth assignment
+induced by \(X_i\mapsto T_i\) as true and \(X_i\mapsto F_i\) as false satisfies
+the Boolean formula \(\varphi\).  All other assignments score one.  The dummy
+students satisfy the one-student lower bound in both truth-value laboratories,
+and capacity 2 leaves room for the variable student.  Hence
+\(\varphi\) is satisfiable if and only if \(\min_a F_\varphi(a)=0\).  A
+polynomial-time exact optimizer for every such succinct objective would
+therefore decide SAT in polynomial time, implying \(P=NP\).  The implemented
+solver deliberately avoids this claim by supporting only structured objective
+families with flow, threshold, rational-comparison, or separable-convex
+structure.
 
 The default mode is an exact Pareto-lexicographic flow solver for the
 objective order:

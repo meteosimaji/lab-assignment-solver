@@ -200,15 +200,26 @@ over that grid, not the source of correctness.
 
 An arbitrary objective `F(assignment)` is outside that theorem. With only
 oracle access to `F`, exact optimization can require checking exponentially
-many feasible assignments. With a succinct unrestricted formula for `F`, the
-objective can encode SAT: let each variable correspond to a student choosing
-one of two laboratories, and let the objective evaluate the Boolean formula
-under the induced truth assignment, scoring 0 for satisfying assignments and 1
-otherwise. A polynomial-time exact optimizer for all such succinct objectives
-would decide whether the optimum is 0 and therefore solve SAT in polynomial
-time, implying P=NP. New objective modes should therefore either reduce to
-min-cost flow, polynomial threshold enumeration, or another proved exact
-polynomial subroutine, or be documented as exponential/heuristic.
+many feasible assignments: if an algorithm has not queried some feasible
+assignment `a*`, then two black-box objectives can agree on all queried
+assignments while one gives `a*` score 0 and all other assignments score 1,
+and the other gives every assignment score 1.
+
+With a succinct unrestricted formula for `F`, the objective can also encode
+SAT while respecting the model's positive-capacity minimum-occupancy rule. For
+each Boolean variable `x_i`, create two laboratories `T_i` and `F_i`, each with
+capacity 2. Create one variable student `X_i` and two dummy students `D_i_T`
+and `D_i_F`. Define the objective to score 0 exactly when `D_i_T` is assigned
+to `T_i`, `D_i_F` is assigned to `F_i`, `X_i` is assigned to either `T_i` or
+`F_i`, and the truth assignment induced by `X_i -> T_i` as true and
+`X_i -> F_i` as false satisfies the Boolean formula. All other assignments
+score 1. The dummy students ensure every positive-capacity laboratory receives
+at least one student, and capacity 2 leaves room for the variable student.
+Thus the formula is satisfiable if and only if the optimum is 0. A
+polynomial-time exact optimizer for all such succinct objectives would solve
+SAT in polynomial time, implying P=NP. New objective modes should therefore
+either reduce to min-cost flow, polynomial threshold enumeration, or another
+proved exact polynomial subroutine, or be documented as exponential/heuristic.
 
 The algorithm is also not claiming to beat every possible specialized solver on
 every synthetic input.  The claim is narrower and stronger: for the stated

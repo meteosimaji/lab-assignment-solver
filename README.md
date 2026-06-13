@@ -26,15 +26,22 @@ heuristic acceptance is used.
 This is not a universal optimizer for every possible scoring rule.  If the
 objective is an arbitrary black-box function of the complete assignment, exact
 optimization has no flow structure to exploit and can require exponentially
-many objective queries.  If an unrestricted objective is given succinctly,
-the optimization problem already contains NP-hard problems: for example, with
-two assignment choices per variable, a Boolean formula can be evaluated by the
-objective and score 0 exactly when the corresponding truth assignment satisfies
-the formula.  A polynomial-time exact optimizer for every such unrestricted
-succinct objective would therefore decide SAT in polynomial time, implying
-P=NP.  The repository avoids that claim by supporting only objective families
-with proved flow, threshold, rational-comparison, or separable-convex
-structure.
+many objective queries.  More concretely, if an optimizer fails to query some
+feasible assignment, two black-box objectives can agree on every queried
+assignment while making that unqueried assignment uniquely optimal in one case
+and not optimal in the other.
+
+If an unrestricted objective is given succinctly, the optimization problem
+already contains NP-hard problems.  A SAT instance can be embedded even with
+the repository's minimum-occupancy rule: for each Boolean variable `x_i`,
+create two laboratories `T_i` and `F_i` of capacity 2, a variable student
+`X_i`, and two dummy students `D_i_T` and `D_i_F`.  The objective scores 0
+exactly when the dummies occupy `T_i` and `F_i`, `X_i` chooses one of them, and
+the induced truth assignment satisfies the formula; otherwise it scores 1.
+A polynomial-time exact optimizer for every such unrestricted succinct
+objective would therefore decide SAT in polynomial time, implying P=NP.  The
+repository avoids that claim by supporting only objective families with proved
+flow, threshold, rational-comparison, or separable-convex structure.
 
 ## Build
 
