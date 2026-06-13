@@ -30,3 +30,19 @@ Small datasets are verified by brute force in `tests/test_assignment.py`; larger
 The test suite also includes an in-test huge-capacity instance to verify that
 the average fill-rate tie-breaker is exact even when ordinary fixed scaling
 would lose the ordering.
+
+Quick checks:
+
+```sh
+./assign_labs datasets/synthetic_sample_labs.txt datasets/synthetic_sample_prefs.txt out.txt --reports
+./assign_labs datasets/forced_outside_labs.txt datasets/forced_outside_prefs.txt out.txt --reports
+./assign_labs datasets/zero_capacity_labs.txt datasets/zero_capacity_prefs.txt out.txt --reports
+```
+
+Useful things to inspect:
+
+- `synthetic_sample`: basic output and sidecar shape.
+- `forced_outside`: outside-preference report is nonempty because all students
+  prefer the same laboratory.
+- `zero_capacity`: the zero-capacity laboratory is never assigned.
+- `rank_variance` and `fill_rate`: small instances used by brute-force tests.

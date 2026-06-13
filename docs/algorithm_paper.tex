@@ -518,10 +518,18 @@ same first component.  The second component of total cost is exactly
 is exactly \(\sum r_{ij}^2x_{ij}=R_2(x)\), so it is minimized next.
 \end{proof}
 
-\section{Exact Minimum Fill-Rate Maximization}
+\section{Exact Fill-Rate Tie-Breaking}
 
-After \(Q\), \(R_1\), and \(R_2\) have been fixed, the solver maximizes
-\(U_{\min}\).  Every possible minimum fill-rate value has the form
+Different objective modes use the same exact fill-rate machinery in different
+orders.  In \texttt{rubric}, \texttt{satisfaction}, and \texttt{guarded}, the
+solver first maximizes \(U_{\mathrm{avg}}\) after the rank target and \(Q\)
+have been fixed, then finds the largest \(U_{\min}\) threshold that preserves
+that same average-fill value.  In \texttt{fair} and \texttt{balanced}, the
+minimum-fill component is the next tie-breaker before the final average-fill
+tie-breaker.
+
+The minimum-fill subproblem is exact.  Every possible minimum fill-rate value
+has the form
 \[
   q=\frac{a}{c_j}
 \]
@@ -543,8 +551,9 @@ required slots are used and the rank components \(R_1\) and \(R_2\) remain
 equal to the previously proven optima.
 
 \begin{theorem}
-The selected candidate maximizes \(U_{\min}\) without worsening \(Q\),
-\(R_1\), or \(R_2\).
+When the selected objective asks for minimum fill before average fill, the
+selected candidate maximizes \(U_{\min}\) without worsening the already fixed
+rank and threshold components.
 \end{theorem}
 
 \begin{proof}
@@ -560,8 +569,8 @@ rank components to remain unchanged, so the earlier optima are preserved.
 \section{Exact Average Fill-Rate Tie-Breaking}
 \label{sec:exact-average-fill}
 
-After \(Q\), \(R_1\), \(R_2\), and \(U_{\min}\) have been fixed, the solver
-maximizes \(U_{\mathrm{avg}}\) without using a floating-point or scaled
+Whenever a mode needs to maximize \(U_{\mathrm{avg}}\) under previously fixed
+components, the solver does so without using a floating-point or scaled
 integer approximation.  Let
 \[
   P=\{j\mid c_j>0\}
@@ -954,7 +963,7 @@ short sequential prefix followed by exponential and binary search.  Every
 accepted point is still solved by the exact flow optimizer, so this only
 removes redundant threshold probes.
 
-Seventh, if all students have identical rank rows, the program uses a closed
+Eighth, if all students have identical rank rows, the program uses a closed
 count-based solver.  The check costs only \(O(NM)\) comparisons, which is the
 same order as reading the rank table once.  When the check succeeds, each
 student is interchangeable with every other student, so the assignment
@@ -966,8 +975,11 @@ frontier group with equal rank, the program performs the same exact rational
 \(U_{\min}\) search on counts, then assigns any remaining units to the
 smallest capacities first.  This last step exactly maximizes
 \(\sum_j n_j/c_j\), because each additional unit in laboratory \(j\) has
-marginal value \(1/c_j\).  The order matters: average fill rate is used only
-after the minimum fill rate has been fixed.  Finally, the count vector is
+marginal value \(1/c_j\).  For minimum-first objectives, average fill rate is
+used only after the minimum fill rate has been fixed.  For rubric-style
+average-first objectives, the implementation instead preserves the best
+average-fill value while searching the minimum-fill threshold, as described
+above.  Finally, the count vector is
 expanded back to the student-wise output format.
 
 \section{Complexity}
@@ -1120,29 +1132,29 @@ values are machine-specific evidence rather than portable constants.
 Case & Wall time & Solver CPU time & Notes \\
 \midrule
 Uniform 256 labs / 1024 students, 8 preferences, rubric
-  & 2.048s & 1.747s & reports/profile on \\
+  & 2.022s & 1.868s & reports/profile on \\
 Popular-skewed 256 labs / 1024 students, 8 preferences, rubric
-  & 2.254s & 2.238s & reports/profile on \\
+  & 2.456s & 2.400s & reports/profile on \\
 Popular-skewed 256 labs / 1024 students, satisfaction
-  & 2.349s & 2.334s & student-friendly rank costs \\
+  & 2.553s & 2.456s & student-friendly rank costs \\
 Popular-skewed 256 labs / 1024 students, fair
-  & 0.779s & 0.768s & worst-rank first \\
+  & 0.896s & 0.850s & worst-rank first \\
 Dense full preferences, 128 labs / 512 students, rubric
-  & 0.570s & 0.560s & reports/profile on \\
+  & 0.609s & 0.598s & reports/profile on \\
 Dense full preferences, 128 labs / 512 students, weighted evaluation
-  & 0.705s & 0.695s
+  & 0.738s & 0.726s
   & seed skipped on wide rank axis; 20 corner misses \\
 Long-name full preferences, 256 labs / 1024 students, rubric
-  & 2.696s & 2.451s & 65.9MB input; read CPU 0.228s \\
+  & 2.712s & 2.458s & 65.9MB input; read CPU 0.227s \\
 Popular-skewed 256 labs / 1024 students, weighted rank-only
-  & 1.732s & 1.721s
+  & 1.823s & 1.805s
   & integer-only fast path \\
 Popular-skewed 256 labs / 1024 students, weighted evaluation
-  & 8.151s & 8.121s
+  & 8.288s & 8.133s
   & priority-queue 2D branch-and-bound; 9 corner-cache hits \\
 Popular-skewed 128 labs / 512 students, exact counterfactual
-  & 1.022s & 0.500s
-  & selected solver CPU; counterfactual CPU 0.512s \\
+  & 1.009s & 0.507s
+  & selected solver CPU; counterfactual CPU 0.492s \\
 \bottomrule
 \end{tabular}
 }
@@ -1158,10 +1170,10 @@ and fill-rate shortcuts are used only when their mathematical preconditions
 make the skipped work redundant.
 
 On a 128-laboratory / 512-student popular-skewed case, the built-in light
-portfolio took 1.819 seconds serially and 0.543 seconds with
+portfolio took 1.895 seconds serially and 0.560 seconds with
 \texttt{--jobs 4}.  With \texttt{--portfolio-summary-only}, the same light
-parallel portfolio took 0.548 seconds and removed per-candidate sidecars after
-reading them.  The deep portfolio took 3.780 seconds serially and 1.416 seconds
+parallel portfolio took 0.565 seconds and removed per-candidate sidecars after
+reading them.  The deep portfolio took 3.837 seconds serially and 1.448 seconds
 with \texttt{--jobs 4}.  This process parallelism is an
 operational speedup only; each candidate is still produced by a normal exact
 \texttt{assign\_labs} invocation.  The reported solver CPU time for parallel
@@ -1170,10 +1182,17 @@ larger than wall time.
 
 \section{Conclusion}
 
-The submitted solver does not enumerate assignments.  Instead, it uses the
-total unimodularity and integrality of network flow to obtain exact assignment
-solutions in polynomial time.  The resulting algorithm is an exact
-Pareto-lexicographic flow solver for the specified objective order:
+The solver does not enumerate assignments for the documented objective modes.
+Instead, for the stated assignment model and the selected structured
+objective, it uses total unimodularity and integrality of network flow,
+together with polynomial threshold enumeration and exact rational comparison,
+to obtain a global optimum exactly.  This is not a claim of a universal
+polynomial-time optimizer for arbitrary assignment objectives.  Unrestricted
+black-box or succinct nonlinear objectives may require exponential search or
+can encode NP-hard variants.
+
+The default mode is an exact Pareto-lexicographic flow solver for the
+objective order:
 \[
   R_1 \rightarrow R_2 \rightarrow Q \rightarrow U_{\mathrm{avg}}
   \rightarrow U_{\min}.

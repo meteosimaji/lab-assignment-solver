@@ -21,6 +21,15 @@
 #define BIG_BASE_MASK 2147483647ULL
 #define MAX_BIG_LIMBS 8192
 #define FAST_INPUT_BUFFER_SIZE 1048576U
+#define FNV_OFFSET_BASIS 1469598103934665603ULL
+#define FNV_PRIME 1099511628211ULL
+#define MAX_CONFIG_WEIGHT 1000000000LL
+#define PRINT_RANK_COST_SAMPLE_LIMIT 8
+#define AVERAGE_FILL_LINEAR_PROBE_LIMIT 8
+#define WEIGHTED_SEED_MAX_Q_AXIS 32
+#define WEIGHTED_SEED_MIN_GRID_SIZE 128LL
+#define LIGHT_PORTFOLIO_CANDIDATE_COUNT 5
+#define MAX_PORTFOLIO_CANDIDATES 8
 
 typedef struct ConstraintSet ConstraintSet;
 typedef struct RankCostModel RankCostModel;
@@ -302,6 +311,7 @@ typedef struct {
     int write_profile;
     int portfolio_mode; /* 0: off, 1: light, 2: deep */
     int keep_candidate_files;
+    int quiet;
     int jobs;
     ObjectiveMode objective_mode;
     int max_rank_slack;
@@ -1451,6 +1461,7 @@ static void print_help(const char *program_name)
     printf("Options:\n");
     printf("  --reports         also write metrics and human-readable reports\n");
     printf("  --profile         also write solver profile counters and phase timings\n");
+    printf("  --quiet           suppress success summary on stdout\n");
     printf("  --portfolio       solve light exact objective portfolio\n");
     printf("  --portfolio-deep  include fill-focused, fill-convex, and weighted-exact candidates\n");
     printf("  --portfolio-summary-only  keep only final output and portfolio summary files\n");
@@ -1477,6 +1488,7 @@ static void print_help(const char *program_name)
     printf("  --weight-outside N        weighted-exact outside-preference penalty\n");
     printf("  --weight-change N         weighted-exact moved-from-base penalty\n");
     printf("  --print-objectives        list objective modes and exit\n");
+    printf("  --print-presets           list bundled rank-cost and weighted preset files\n");
     printf("  --print-rank-costs        print default rank-cost table sample and exit\n");
     printf("  --explain-weights [FILE]  top-level command: explain weighted-exact terms and optional preset file\n");
     printf("  --help            show this help message\n");
@@ -1500,6 +1512,33 @@ static void print_objectives(void)
     printf("  Exact scalar score: w1*R1 + w2*R2 + w3*Q - w4*Uavg - w5*Umin + w6*outside + w7*change.\n");
 }
 
+static void print_presets(void)
+{
+    printf("rank-cost presets for --objective satisfaction:\n");
+    printf("  rank_costs/student_friendly.txt\n");
+    printf("    Strong first-choice preference, larger tail penalties, high outside-preference cost.\n");
+    printf("  rank_costs/balanced_satisfaction.txt\n");
+    printf("    Moderate first-choice preference and smoother rank tail.\n");
+    printf("  rank_costs/strict_outside_avoidance.txt\n");
+    printf("    Keeps ordinary rank costs moderate but makes outside-preference assignments very expensive.\n");
+    printf("\n");
+    printf("weighted-exact presets for --objective weighted-exact:\n");
+    printf("  weights/evaluation_balance.txt\n");
+    printf("    Balanced scalar weights for rank, worst rank, fill rates, and outside-preference count.\n");
+    printf("  weights/rank_only.txt\n");
+    printf("    Integer-only rank/outside weighted objective; fastest weighted-exact preset.\n");
+    printf("  weights/fill_balance.txt\n");
+    printf("    Fill-rate-heavy exact weighted objective; may use threshold search.\n");
+    printf("  weights/minimum_change_adjustment.txt\n");
+    printf("    Designed for --base-assignment runs where changed_students should be expensive.\n");
+    printf("\n");
+    printf("inspection commands:\n");
+    printf("  ./assign_labs --print-objectives\n");
+    printf("  ./assign_labs --print-presets\n");
+    printf("  ./assign_labs --print-rank-costs\n");
+    printf("  ./assign_labs --explain-weights weights/evaluation_balance.txt\n");
+}
+
 static void print_default_rank_costs(void)
 {
     RankCostModel model;
@@ -1512,7 +1551,9 @@ static void print_default_rank_costs(void)
            model.tail_linear,
            model.tail_quadratic,
            model.outside_cost);
-    for (rank_value = 1; rank_value <= 8; rank_value++) {
+    for (rank_value = 1;
+         rank_value <= PRINT_RANK_COST_SAMPLE_LIMIT;
+         rank_value++) {
         printf("rank %d %lld\n", rank_value, rank_cost_formula_value(&model, rank_value));
     }
     printf("outside %lld\n", model.outside_cost);
@@ -1538,6 +1579,8 @@ static void print_weighted_objective_explanation(const WeightedObjective *weight
     printf("Additive terms are rank_sum, rank_square_sum, outside_preference_count, and changed_students.\n");
     printf("average_fill_rate is additive after exact rational scaling when possible.\n");
     printf("Global terms max_rank and minimum_fill_rate require threshold search; nonzero weights can make weighted-exact slower.\n");
+    printf("Configuration values are nonnegative integers up to %lld.\n",
+           MAX_CONFIG_WEIGHT);
     printf("\n");
     printf("complexity notes:\n");
     if (weights->minimum_fill == 0LL && weights->average_fill == 0LL) {
@@ -1755,10 +1798,10 @@ static void validate_student_id_token(const char *student_id, const char *contex
 static unsigned long long hash_text_bytes(const char *text)
 {
     const unsigned char *position = (const unsigned char *)text;
-    unsigned long long hash_value = 1469598103934665603ULL;
+    unsigned long long hash_value = FNV_OFFSET_BASIS;
     while (*position != '\0') {
         hash_value ^= (unsigned long long)(*position);
-        hash_value *= 1099511628211ULL;
+        hash_value *= FNV_PRIME;
         position++;
     }
     return hash_value;
@@ -3124,7 +3167,7 @@ static unsigned long long hash_student_group_signature(
     int max_rank,
     StudentGroupingMode grouping_mode)
 {
-    unsigned long long hash_value = 1469598103934665603ULL;
+    unsigned long long hash_value = FNV_OFFSET_BASIS;
     int lab_index;
 
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
@@ -3136,7 +3179,7 @@ static unsigned long long hash_student_group_signature(
         int byte_index;
         for (byte_index = 0; byte_index < 4; byte_index++) {
             hash_value ^= (unsigned long long)(value & 0xffU);
-            hash_value *= 1099511628211ULL;
+            hash_value *= FNV_PRIME;
             value >>= 8;
         }
     }
@@ -6027,7 +6070,9 @@ static SolutionResult solve_average_then_minimum_fill(
     int last_true_index = 0;
     int first_false_index = minimum_candidates.size;
     int sequential_limit =
-        minimum_candidates.size < 8 ? minimum_candidates.size : 8;
+        minimum_candidates.size < AVERAGE_FILL_LINEAR_PROBE_LIMIT ?
+        minimum_candidates.size :
+        AVERAGE_FILL_LINEAR_PROBE_LIMIT;
     int probe_index = 1;
 
     best_solution = solve_with_minimum_counts(problem_data,
@@ -7300,9 +7345,9 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
      * The first relaxed corner is considered as an incumbent anyway, so skip
      * this optional seed when the rank axis itself is large.
      */
-    if ((last_q_index - first_q_index + 1) <= 32 &&
+    if ((last_q_index - first_q_index + 1) <= WEIGHTED_SEED_MAX_Q_AXIS &&
         (long long)(last_q_index - first_q_index + 1) *
-            (long long)minimum_candidates.size > 128LL) {
+            (long long)minimum_candidates.size > WEIGHTED_SEED_MIN_GRID_SIZE) {
         weighted_seed_initial_incumbent(problem_data,
                                         active_weights,
                                         &score_context,
@@ -7759,6 +7804,70 @@ static char *explanation_output_path_for(const char *output_file_path)
     return explanation_path;
 }
 
+static void print_success_summary(const char *output_file_path,
+                                  const ProgramOptions *options)
+{
+    char *metrics_path = NULL;
+    char *lab_report_path = NULL;
+    char *student_report_path = NULL;
+    char *outside_report_path = NULL;
+    char *reasons_report_path = NULL;
+    char *portfolio_path = NULL;
+    char *profile_path = NULL;
+    char *explanation_path = NULL;
+    char *adjustment_path = NULL;
+
+    if (options->quiet ||
+        !(options->write_reports ||
+          options->write_profile ||
+          options->portfolio_mode ||
+          options->explain_student_id != NULL ||
+          options->try_lock_text != NULL ||
+          options->base_assignment_path != NULL)) {
+        return;
+    }
+
+    printf("output=%s\n", output_file_path);
+    if (options->write_reports) {
+        metrics_path = metrics_output_path_for(output_file_path);
+        lab_report_path = lab_report_output_path_for(output_file_path);
+        student_report_path = student_report_output_path_for(output_file_path);
+        outside_report_path = outside_report_output_path_for(output_file_path);
+        reasons_report_path = reasons_report_output_path_for(output_file_path);
+        printf("reports=%s,%s,%s,%s,%s\n",
+               metrics_path,
+               lab_report_path,
+               student_report_path,
+               outside_report_path,
+               reasons_report_path);
+    }
+    if (options->portfolio_mode) {
+        portfolio_path = portfolio_report_output_path_for(output_file_path);
+        printf("portfolio=%s\n", portfolio_path);
+    }
+    if (options->write_profile) {
+        profile_path = profile_output_path_for(output_file_path);
+        printf("profile=%s\n", profile_path);
+    }
+    if (options->explain_student_id != NULL || options->try_lock_text != NULL) {
+        explanation_path = explanation_output_path_for(output_file_path);
+        printf("explain=%s\n", explanation_path);
+    }
+    if (options->base_assignment_path != NULL && options->write_reports) {
+        adjustment_path = adjustment_report_output_path_for(output_file_path);
+        printf("adjustment=%s\n", adjustment_path);
+    }
+    free(metrics_path);
+    free(lab_report_path);
+    free(student_report_path);
+    free(outside_report_path);
+    free(reasons_report_path);
+    free(portfolio_path);
+    free(profile_path);
+    free(explanation_path);
+    free(adjustment_path);
+}
+
 static char *portfolio_assignment_output_path_for(const char *output_file_path,
                                                   const char *candidate_name)
 {
@@ -8069,7 +8178,8 @@ static void reject_portfolio_assignment_paths_equal_to_input_paths(
         "fill_convex",
         "weighted_exact"
     };
-    int candidate_count = portfolio_mode >= 2 ? 8 : 5;
+    int candidate_count =
+        portfolio_mode >= 2 ? MAX_PORTFOLIO_CANDIDATES : LIGHT_PORTFOLIO_CANDIDATE_COUNT;
     int candidate_index;
     for (candidate_index = 0;
          candidate_index < candidate_count;
@@ -9271,7 +9381,7 @@ static void write_portfolio_report_file(const char *report_path,
         }
     }
     if (fprintf(report_file,
-                "candidate\tavg_rank\trank_stddev\tmax_rank\tavg_dissatisfaction\tdissatisfaction_stddev\tmax_dissatisfaction\tavg_fill\tmin_fill\toutside_count\tstrengths\tweaknesses\tavg_rank_component\tstddev_component\tmax_rank_component\tavg_fill_deficit\tmin_fill_deficit\tsolver_seconds\trecommendation_score\trecommended\n") < 0) {
+                "candidate\tavg_rank\trank_stddev\tmax_rank\tavg_dissatisfaction\tdissatisfaction_stddev\tmax_dissatisfaction\tavg_fill\tmin_fill\toutside_count\tstrengths\tweaknesses\tavg_rank_component\tstddev_component\tmax_rank_component\tavg_fill_deficit\tmin_fill_deficit\tsolver_seconds\trecommendation_score\trecommended\ttie_break_order\tselection_reason\n") < 0) {
         fclose(report_file);
         fail_with_context(report_path, "write failed");
     }
@@ -9306,7 +9416,7 @@ static void write_portfolio_report_file(const char *report_path,
             weaknesses,
             sizeof(weaknesses));
         if (fprintf(report_file,
-                    "%s\t%.17Lg\t%.17Lg\t%d\t%.17Lg\t%.17Lg\t%lld\t%.17Lg\t%.17Lg\t%d\t%s\t%s\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%s\n",
+                    "%s\t%.17Lg\t%.17Lg\t%d\t%.17Lg\t%.17Lg\t%lld\t%.17Lg\t%.17Lg\t%d\t%s\t%s\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%.17Lg\t%s\t%d\t%s\n",
                     candidates[candidate_index].name,
                     candidates[candidate_index].metrics.average_rank,
                     candidates[candidate_index].metrics.rank_stddev,
@@ -9326,7 +9436,11 @@ static void write_portfolio_report_file(const char *report_path,
                     components.minimum_fill_deficit,
                     candidates[candidate_index].solver_cpu_seconds,
                     candidates[candidate_index].recommendation_score,
-                    candidates[candidate_index].recommended ? "yes" : "no") < 0) {
+                    candidates[candidate_index].recommended ? "yes" : "no",
+                    candidate_index + 1,
+                    candidates[candidate_index].recommended ?
+                        "lowest_recommendation_score_then_candidate_order" :
+                        "not_selected") < 0) {
             fclose(report_file);
             fail_with_context(report_path, "write failed");
         }
@@ -9740,6 +9854,7 @@ static int spawn_portfolio_child(const ProgramOptions *options,
         ADD_ALLOCATED(format_long_long_argument(options->change_penalty));
     }
     ADD_LITERAL("--reports");
+    ADD_LITERAL("--quiet");
     if (options->write_profile) {
         ADD_LITERAL("--profile");
     }
@@ -9788,7 +9903,7 @@ static int *solve_portfolio_problem(const ProblemData *problem_data,
                                     const char *output_file_path,
                                     long double *solver_seconds_out)
 {
-    PortfolioCandidate candidates[8];
+    PortfolioCandidate candidates[MAX_PORTFOLIO_CANDIDATES];
     int candidate_count = 0;
     int candidate_index;
     int recommended_index = 0;
@@ -9855,8 +9970,8 @@ static int *solve_portfolio_problem(const ProblemData *problem_data,
 #ifdef _WIN32
         /* Portable fallback: the exact candidates remain deterministic. */
 #else
-        char *candidate_output_paths[8];
-        int pid_by_candidate[8] = {0};
+        char *candidate_output_paths[MAX_PORTFOLIO_CANDIDATES];
+        int pid_by_candidate[MAX_PORTFOLIO_CANDIDATES] = {0};
         int running_children = 0;
         int max_jobs = options->jobs < candidate_count ? options->jobs : candidate_count;
         for (candidate_index = 0;
@@ -9994,6 +10109,7 @@ static ProgramOptions default_program_options(void)
     options.write_profile = 0;
     options.portfolio_mode = 0;
     options.keep_candidate_files = 1;
+    options.quiet = 0;
     options.jobs = 1;
     options.objective_mode = OBJECTIVE_RUBRIC;
     options.max_rank_slack = 1;
@@ -10035,13 +10151,17 @@ static ObjectiveMode parse_objective_mode(const char *text)
     if (strcmp(text, "weighted-exact") == 0) {
         return OBJECTIVE_WEIGHTED_EXACT;
     }
-    fail_with_context("objective", "unknown objective mode");
+    fail_with_context_format_hint(
+        "objective",
+        "run ./assign_labs --print-objectives to list valid modes",
+        "unknown objective mode '%s'",
+        text);
     return OBJECTIVE_FAIR;
 }
 
 static long long parse_nonnegative_weight(const char *text, const char *context)
 {
-    return parse_long_long_range(text, 0LL, 1000000000LL, context);
+    return parse_long_long_range(text, 0LL, MAX_CONFIG_WEIGHT, context);
 }
 
 static void load_weights_file(const char *weights_path, WeightedObjective *objective)
@@ -10143,7 +10263,10 @@ static void load_rank_costs_file(const char *rank_costs_path,
             }
             rank_value = parse_int_range(rank_text, 1, max_rank, rank_costs_path);
             cost_value =
-                parse_long_long_range(cost_text, 0LL, 1000000000LL, rank_costs_path);
+                parse_long_long_range(cost_text,
+                                      0LL,
+                                      MAX_CONFIG_WEIGHT,
+                                      rank_costs_path);
             check_no_extra_token(&tokenizer, rank_costs_path);
             model->rank_costs[rank_value] = rank_value == 1 ? 0LL : cost_value;
         } else if (strcmp(command, "outside") == 0) {
@@ -10154,7 +10277,10 @@ static void load_rank_costs_file(const char *rank_costs_path,
                 fail_with_context(rank_costs_path, "outside entry requires cost");
             }
             cost_value =
-                parse_long_long_range(cost_text, 0LL, 1000000000LL, rank_costs_path);
+                parse_long_long_range(cost_text,
+                                      0LL,
+                                      MAX_CONFIG_WEIGHT,
+                                      rank_costs_path);
             check_no_extra_token(&tokenizer, rank_costs_path);
             model->outside_cost = cost_value;
             model->rank_costs[max_rank] = cost_value;
@@ -10190,6 +10316,8 @@ static ProgramOptions parse_program_options(int argc, char **argv)
             options.write_reports = 1;
         } else if (strcmp(argument, "--profile") == 0) {
             options.write_profile = 1;
+        } else if (strcmp(argument, "--quiet") == 0) {
+            options.quiet = 1;
         } else if (strcmp(argument, "--portfolio") == 0) {
             if (options.portfolio_mode == 0) {
                 options.portfolio_mode = 1;
@@ -10328,7 +10456,9 @@ static ProgramOptions parse_program_options(int argc, char **argv)
                                                               argument),
                                          argument);
         } else {
-            fail_with_context(argument, "unknown option");
+            fail_with_context_format_hint(argument,
+                                          "run ./assign_labs --help to list options",
+                                          "unknown option");
         }
     }
     return options;
@@ -10359,6 +10489,10 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "--print-objectives") == 0) {
         print_objectives();
+        return EXIT_SUCCESS;
+    }
+    if (argc == 2 && strcmp(argv[1], "--print-presets") == 0) {
+        print_presets();
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--print-rank-costs") == 0) {
@@ -10555,6 +10689,7 @@ int main(int argc, char **argv)
         solver_profile_write(profile_output_path, &profile);
         free(profile_output_path);
     }
+    print_success_summary(argv[3], &options);
 
     free(assignment);
     free(base_assignment);

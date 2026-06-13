@@ -2,19 +2,14 @@
 set -eu
 
 rm -f submit.zip
-zip -r submit.zip \
-  assignment.c \
-  Makefile \
-  LICENSE \
-  README.md \
-  datasets \
-  rank_costs \
-  weights \
-  tests \
-  docs/algorithm_paper.tex \
-  docs/algorithm_paper.pdf \
-  docs/benchmark_results.tsv \
-  scripts \
+submission_files="assignment.c Makefile LICENSE README.md datasets rank_costs weights tests"
+submission_files="$submission_files docs/ALGORITHM_PROOF.md docs/algorithm_paper.tex"
+if [ -f docs/algorithm_paper.pdf ]; then
+  submission_files="$submission_files docs/algorithm_paper.pdf"
+fi
+submission_files="$submission_files docs/benchmark_results.tsv scripts"
+
+zip -r submit.zip $submission_files \
   -x '*/__pycache__/*' \
   -x '*/.pytest_cache/*' \
   -x '*/.DS_Store' \

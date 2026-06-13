@@ -577,12 +577,46 @@ B 1
         include_reports=False,
     )
     assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
     validate_assignment(lab_text, preference_text, output_path)
     assert output_path.exists()
     assert not metrics_path_for(output_path).exists()
     assert not lab_report_path_for(output_path).exists()
     assert not student_report_path_for(output_path).exists()
     assert not outside_report_path_for(output_path).exists()
+
+
+def test_reports_print_success_summary_and_quiet_suppresses_it(tmp_path):
+    lab_text = """\
+2
+A 1
+B 1
+"""
+    preference_text = """\
+2 1
+00001 A
+00002 A
+"""
+    completed, output_path = run_solver(
+        tmp_path / "loud",
+        lab_text,
+        preference_text,
+        include_reports=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert f"output={output_path}" in completed.stdout
+    assert f"reports={metrics_path_for(output_path)}" in completed.stdout
+
+    quiet_completed, quiet_output_path = run_solver(
+        tmp_path / "quiet",
+        lab_text,
+        preference_text,
+        include_reports=True,
+        extra_args=["--quiet"],
+    )
+    assert quiet_completed.returncode == 0, quiet_completed.stderr
+    assert quiet_completed.stdout == ""
+    assert metrics_path_for(quiet_output_path).exists()
 
 
 def test_forced_outside_preference_when_required(tmp_path):
@@ -1288,6 +1322,17 @@ C 2
     assert rank_costs.returncode == 0
     assert "rank 2 100" in rank_costs.stdout
     assert "outside 10000" in rank_costs.stdout
+
+    presets = subprocess.run(
+        [str(BINARY), "--print-presets"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert presets.returncode == 0
+    assert "rank_costs/student_friendly.txt" in presets.stdout
+    assert "weights/evaluation_balance.txt" in presets.stdout
+    assert "inspection commands" in presets.stdout
 
     explain_weights = subprocess.run(
         [str(BINARY), "--explain-weights", str(ROOT / "weights" / "evaluation_balance.txt")],

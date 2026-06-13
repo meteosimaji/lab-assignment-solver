@@ -254,6 +254,7 @@ def run_case_once(case, repeat_index, binary, bench_dir):
         *case_args,
         "--reports",
         "--profile",
+        "--quiet",
     ]
     start = time.perf_counter()
     completed = subprocess.run(

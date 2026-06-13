@@ -6,6 +6,31 @@ This program assigns students to laboratories from two text input files.
 The default mode writes only the simple student-to-laboratory assignment output.  Add
 `--reports` when you also want metrics and a laboratory-wise checking report.
 
+For the proof that the solver is exact for the selected objective and that the
+speedups preserve the same answer, see
+[`docs/ALGORITHM_PROOF.md`](docs/ALGORITHM_PROOF.md).  The longer TeX write-up
+is in [`docs/algorithm_paper.tex`](docs/algorithm_paper.tex).
+
+## Scope of Exactness and Complexity
+
+For the fixed assignment model in this repository and for the objective selected
+by `--objective`, the solver computes a global optimum exactly.  The
+polynomial-time claim applies to the implemented structured objectives:
+additive rank/outside/change costs, the documented lexicographic orders
+involving `Q`, `Uavg`, and `Umin`, convex separable fill penalties, and
+`weighted-exact` with nonnegative integer weights in the documented scalar
+formula.  These are solved by integral min-cost flow plus a polynomial number
+of exact threshold and rational comparisons; no floating-point score or
+heuristic acceptance is used.
+
+This is not a universal optimizer for every possible scoring rule.  If the
+objective is an arbitrary black-box function of the complete assignment, exact
+optimization has no flow structure to exploit and can require exponentially
+many objective queries.  If an unrestricted objective is given succinctly, it
+can encode NP-hard assignment variants such as pairwise student interaction
+rewards or general nonlinear subset penalties.  A universal polynomial-time
+exact solver for all such objectives would imply P=NP.
+
 ## Build
 
 ```sh
@@ -74,9 +99,33 @@ Recommended commands:
   --reports
 ```
 
+Decision guide:
+
+| Goal | Command pattern | Why |
+| --- | --- | --- |
+| Default evaluation-style result | `--objective rubric --reports` | Optimizes average rank, rank spread, worst rank, then fill rates in a deterministic exact order. |
+| Student-facing satisfaction | `--objective satisfaction --rank-costs rank_costs/student_friendly.txt --reports` | Makes first-choice loss much more expensive without leaving min-cost flow. |
+| Worst-rank fairness | `--objective fair --reports` | Protects the maximum assigned rank first. |
+| Compare exact candidates | `--portfolio --portfolio-summary-only --reports` | Produces several exact candidates and a TSV recommendation table. |
+| Deep weighted study | `--objective weighted-exact --weights weights/evaluation_balance.txt --reports --profile` | Solves the full scalar weighted objective exactly and explains runtime through profile counters. |
+
+Configuration inspection commands:
+
+```sh
+./assign_labs --print-objectives
+./assign_labs --print-presets
+./assign_labs --print-rank-costs
+./assign_labs --explain-weights weights/evaluation_balance.txt
+```
+
 Default mode creates only:
 
 - `out.txt`: student-wise assignment file for submission and external scoring.
+
+Plain runs are quiet so that external tools can consume stdout freely.  When
+`--reports`, `--profile`, `--portfolio`, or counterfactual explanation is used,
+the program prints a short success summary such as `output=...`,
+`reports=...`, and `portfolio=...`.  Add `--quiet` to suppress that summary.
 
 For human review, run:
 
@@ -122,7 +171,8 @@ are:
   `first_choice_demand`, `first_choice_capacity`, and
   `first_choice_assigned`.
 - `portfolio.tsv`: candidate metrics, local recommendation components,
-  `strengths`, `weaknesses`, `solver_seconds`, and `recommended`.
+  `strengths`, `weaknesses`, `solver_seconds`, `recommended`,
+  `tie_break_order`, and `selection_reason`.
 - `profile.tsv`: graph/flow call counters, threshold candidate counts,
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
   branch-and-bound counters, and phase CPU timings.  The legacy
@@ -206,7 +256,8 @@ A weighted exact mode is also available:
 ```
 
 Preset files are included under `rank_costs/` and `weights/`.  They are plain
-text and can be edited without recompiling:
+text and can be edited without recompiling.  Configuration values are
+nonnegative integers up to `1000000000`:
 
 ```text
 rank_costs/student_friendly.txt
@@ -223,6 +274,7 @@ weighted-exact preset behavior:
 
 ```sh
 ./assign_labs --print-objectives
+./assign_labs --print-presets
 ./assign_labs --print-rank-costs
 ./assign_labs --explain-weights weights/evaluation_balance.txt
 ```
