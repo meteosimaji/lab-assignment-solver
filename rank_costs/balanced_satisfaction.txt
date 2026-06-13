@@ -1,0 +1,10 @@
+# Balanced dissatisfaction model for ordinary operation.
+rank 1 0
+rank 2 150
+rank 3 198
+rank 4 262
+rank 5 342
+rank 6 438
+rank 7 550
+rank 8 678
+outside 20000

@@ -1,0 +1,11 @@
+10 3
+00001 LabA LabB LabC
+00002 LabB LabC LabD
+00003 LabD LabF LabG
+00004 LabF LabG LabH
+00005 LabA LabC LabE
+00006 LabB LabD LabF
+00007 LabG LabH LabA
+00008 LabH LabA LabB
+00009 LabC LabF LabH
+00010 LabD LabG LabB

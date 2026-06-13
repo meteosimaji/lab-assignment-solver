@@ -1,0 +1,8 @@
+# Fill-heavy exact scalar preset for deep analysis.
+rank_sum 1
+rank_square 0
+max_rank 0
+average_fill 1000
+minimum_fill 1000
+outside 1000
+change 0

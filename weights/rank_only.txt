@@ -1,0 +1,8 @@
+# Integer-only weighted-exact preset; exercises the fast path.
+rank_sum 50
+rank_square 20
+max_rank 15
+average_fill 0
+minimum_fill 0
+outside 30
+change 0

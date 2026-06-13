@@ -1,0 +1,8 @@
+# Default weighted-exact evaluation-balanced scalar weights.
+rank_sum 50
+rank_square 20
+max_rank 15
+average_fill 5
+minimum_fill 5
+outside 30
+change 0

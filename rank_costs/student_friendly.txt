@@ -1,0 +1,10 @@
+# Strongly prioritizes first-choice satisfaction and avoiding outside choices.
+rank 1 0
+rank 2 300
+rank 3 360
+rank 4 440
+rank 5 540
+rank 6 660
+rank 7 800
+rank 8 960
+outside 30000

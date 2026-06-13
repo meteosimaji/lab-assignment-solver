@@ -1,0 +1,8 @@
+# Useful with --base-assignment; exact score strongly discourages changing students.
+rank_sum 50
+rank_square 20
+max_rank 15
+average_fill 5
+minimum_fill 5
+outside 30
+change 1000

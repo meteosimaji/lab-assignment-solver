@@ -1,0 +1,9 @@
+8
+LabA 5
+LabB 4
+LabC 2
+LabD 3
+LabE 0
+LabF 5
+LabG 4
+LabH 1
