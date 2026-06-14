@@ -1595,8 +1595,12 @@ C 2
     profile = read_profile(output_path)
     assert "active_arc_template_hits" in profile
     assert "active_arc_template_misses" in profile
+    assert "mcf_graph_template_hits" in profile
+    assert "mcf_graph_template_misses" in profile
     assert int(profile["active_arc_template_hits"]) > 0
     assert int(profile["active_arc_template_misses"]) > 0
+    assert int(profile["mcf_graph_template_hits"]) > 0
+    assert int(profile["mcf_graph_template_misses"]) > 0
 
 
 def test_profile_reports_radix_heap_usage(tmp_path):

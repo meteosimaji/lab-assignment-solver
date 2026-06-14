@@ -64,11 +64,12 @@ safety conditions are not met.
 - Initial min-cost-flow potentials use layered DAG relaxation on fresh
   assignment graphs and fall back to the previous queue method if the graph is
   not in layer order.
-- Repeated ungrouped min-cost-flow solves reuse an active-arc template keyed by
-  the problem pointer, constraint pointer, and rank threshold.  The template
-  stores only active student-laboratory arcs and adjacency reservation counts;
-  costs, residual capacities, reverse edges, and lower-bound sink edges are
-  rebuilt for every solve.
+- Repeated ungrouped min-cost-flow solves reuse both an active-arc template and
+  an immutable min-cost-flow graph template keyed by the problem pointer,
+  constraint pointer, and rank threshold.  The graph template contains only
+  source-to-student and student-to-laboratory edges with placeholder costs.
+  Each solve deep-copies it, patches assignment-edge costs, and appends
+  laboratory-to-sink lower-bound/reward edges.  Residual state is not shared.
 - Ordinary min-cost-flow Dijkstra uses a radix heap when the current reduced
   residual graph can be encoded as a monotone unsigned scalar key.  The runtime
   check requires nonnegative reduced tuple components and overflow-checked
@@ -111,9 +112,9 @@ unsafe.
 - Extend active-arc template reuse to grouped solves only after the group-cache
   key also carries a stable generation identifier.  Pointer identity alone is
   not enough for stack-allocated `StudentGroups`.
-- Reuse fuller immutable min-cost-flow graph templates only if residual
-  capacities and reverse-edge ownership remain isolated for ASan-clean repeated
-  solves.
+- Further extend immutable graph templates to laboratory-to-sink edge layouts
+  only if residual capacities, reverse-edge ownership, and objective-specific
+  reward costs remain isolated for ASan-clean repeated solves.
 - Represent student group signatures sparsely for short preference lists.
 - Investigate outside-preference edge compression only under strict conditions
   that preserve listed-vs-unlisted laboratory identity.
@@ -132,6 +133,8 @@ unsafe.
 - `student_group_builds`: opportunity for group cache or sparse signatures.
 - `active_arc_template_hits` and `active_arc_template_misses`: topology reuse
   for repeated ungrouped min-cost-flow solves.
+- `mcf_graph_template_hits` and `mcf_graph_template_misses`: immutable graph
+  template reuse before per-solve cost patching and lower-bound edge creation.
 - `radix_heap_attempts`, `radix_heap_used`, and `radix_heap_fallbacks`:
   checked scalar Dijkstra queue usage.
 - `average_fill_resource_vectors_tested` and

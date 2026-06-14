@@ -1060,14 +1060,16 @@ grouped flow is expanded back to concrete student ids after optimization.
 This reduces the graph from \(N\) student nodes to \(G\leq N\) group nodes
 without changing any objective value.
 
-Seventh, repeated ungrouped min-cost-flow solves reuse an active-arc template
-when the problem pointer, constraint pointer, and rank threshold are unchanged.
-The template contains only the student--laboratory arc list and adjacency
-reservation counts.  It does not contain edge costs, residual capacities,
-reverse edges, or laboratory lower-bound sink edges; all of those are rebuilt
-for each solve.  Therefore the reuse cannot transfer residual flow state or an
-objective-specific cost from one threshold check to another.  It only removes a
-duplicate scan of the active edge set.
+Seventh, repeated ungrouped min-cost-flow solves reuse templates when the
+problem pointer, constraint pointer, and rank threshold are unchanged.  The
+active-arc template records the student--laboratory arc list and adjacency
+reservation counts.  The immutable graph template records source-to-student
+and student-to-laboratory edges with placeholder costs.  Each solve deep-copies
+that graph, patches the assignment-edge costs for the current objective, and
+then appends the laboratory lower-bound and reward edges for the current count
+vector.  Residual capacities and reverse-edge residual flow are therefore never
+shared across solves, and objective-specific costs cannot leak from one
+threshold check to another.
 
 Eighth, the rubric objective uses monotonicity in the minimum-fill threshold
 after the optimal average fill-rate has been fixed.  Let \(A(u)\) be the

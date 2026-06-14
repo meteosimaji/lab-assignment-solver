@@ -195,9 +195,12 @@ feasible set or objective value.
 - Ungrouped active-arc template reuse: repeated ungrouped solves with the same
   problem pointer, constraint pointer, and rank threshold reuse only the active
   student-laboratory arc list and adjacency reservation counts.  Every solve
-  still rebuilds edge costs, residual capacities, reverse edges, and
-  laboratory lower-bound edges, so no residual flow state or objective-specific
-  cost can leak between solves.
+  also deep-copies an immutable min-cost-flow graph template containing only
+  source-to-student and student-to-laboratory edges.  Assignment-edge costs are
+  patched after the copy, and laboratory-to-sink lower-bound/reward edges are
+  added fresh for the current count vector.  Therefore residual capacities,
+  reverse-edge residual flow, and objective-specific costs cannot leak between
+  solves.
 - Radix heap Dijkstra path: the radix heap is used only after every positive
   residual edge has nonnegative reduced `(first, second, third)` components and
   the solver can choose overflow-checked scales `B_2` and `B_1` such that

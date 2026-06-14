@@ -183,6 +183,11 @@ typedef struct {
     int arc_capacity;
     int *allowed_counts_by_student;
     int *incoming_counts_by_lab;
+    int graph_template_valid;
+    McfGraph graph_template;
+    AssignmentArc *assignment_arcs;
+    int assignment_arc_count;
+    int assignment_arc_capacity;
 } UngroupedActiveArcTemplate;
 
 typedef struct {
@@ -391,6 +396,8 @@ typedef struct {
     long long ordinary_average_scalar_fallback_not_applicable;
     long long active_arc_template_hits;
     long long active_arc_template_misses;
+    long long mcf_graph_template_hits;
+    long long mcf_graph_template_misses;
     long long radix_heap_attempts;
     long long radix_heap_used;
     long long radix_heap_fallbacks;
@@ -621,6 +628,7 @@ static void *checked_realloc(void *pointer, size_t byte_count);
 static size_t checked_multiply_size(size_t left, size_t right, const char *context);
 static NORETURN void fail_with_message(const char *message);
 static NORETURN void fail_with_context(const char *context, const char *detail);
+static void mcf_graph_free(McfGraph *graph);
 static StudentGroups build_student_groups(const ProblemData *problem_data,
                                           int max_rank,
                                           StudentGroupingMode grouping_mode);
@@ -3589,7 +3597,11 @@ static UngroupedActiveArcTemplate ungrouped_active_arc_template_cache;
 static void ungrouped_active_arc_template_clear(
     UngroupedActiveArcTemplate *template_value)
 {
+    if (template_value->graph_template_valid) {
+        mcf_graph_free(&template_value->graph_template);
+    }
     free(template_value->arcs);
+    free(template_value->assignment_arcs);
     free(template_value->allowed_counts_by_student);
     free(template_value->incoming_counts_by_lab);
     memset(template_value, 0, sizeof(*template_value));
@@ -3634,7 +3646,7 @@ static int ungrouped_active_arc_template_matches(
            template_value->lab_count == problem_data->lab_count;
 }
 
-static const UngroupedActiveArcTemplate *ungrouped_active_arc_template_get(
+static UngroupedActiveArcTemplate *ungrouped_active_arc_template_get(
     const ProblemData *problem_data,
     int best_max_rank)
 {
@@ -3982,10 +3994,43 @@ static McfGraph mcf_graph_create(int node_count)
 static void mcf_graph_free(McfGraph *graph)
 {
     int node_index;
+    if (graph->adjacency == NULL) {
+        graph->node_count = 0;
+        return;
+    }
     for (node_index = 0; node_index < graph->node_count; node_index++) {
         free(graph->adjacency[node_index].items);
     }
     free(graph->adjacency);
+    graph->adjacency = NULL;
+    graph->node_count = 0;
+}
+
+static McfGraph mcf_graph_clone(const McfGraph *source_graph)
+{
+    McfGraph clone;
+    int node_index;
+    clone.node_count = source_graph->node_count;
+    solver_profile_note_mcf_graph(clone.node_count);
+    clone.adjacency =
+        checked_calloc((size_t)clone.node_count, sizeof(McfEdgeList));
+    for (node_index = 0; node_index < clone.node_count; node_index++) {
+        const McfEdgeList *source_list = &source_graph->adjacency[node_index];
+        McfEdgeList *target_list = &clone.adjacency[node_index];
+        if (source_list->capacity <= 0) {
+            continue;
+        }
+        target_list->items =
+            checked_malloc((size_t)source_list->capacity * sizeof(McfEdge));
+        target_list->size = source_list->size;
+        target_list->capacity = source_list->capacity;
+        if (source_list->size > 0) {
+            memcpy(target_list->items,
+                   source_list->items,
+                   (size_t)source_list->size * sizeof(McfEdge));
+        }
+    }
+    return clone;
 }
 
 static int mcf_add_edge_with_fill(McfGraph *graph,
@@ -4055,6 +4100,113 @@ static void assignment_arc_reserve(AssignmentArcList *list, int minimum_capacity
                                       (size_t)minimum_capacity * sizeof(AssignmentArc));
         list->capacity = minimum_capacity;
     }
+}
+
+static void ungrouped_graph_template_assignment_arc_push(
+    UngroupedActiveArcTemplate *template_value,
+    AssignmentArc arc)
+{
+    if (template_value->assignment_arc_count ==
+        template_value->assignment_arc_capacity) {
+        int new_capacity =
+            template_value->assignment_arc_capacity == 0 ?
+            256 :
+            template_value->assignment_arc_capacity * 2;
+        if (new_capacity < template_value->assignment_arc_capacity) {
+            fail_with_context("mcf graph template", "assignment arc overflow");
+        }
+        template_value->assignment_arcs =
+            checked_realloc(template_value->assignment_arcs,
+                            (size_t)new_capacity * sizeof(AssignmentArc));
+        template_value->assignment_arc_capacity = new_capacity;
+    }
+    template_value->assignment_arcs[template_value->assignment_arc_count] = arc;
+    template_value->assignment_arc_count++;
+}
+
+static void ungrouped_active_arc_template_ensure_graph(
+    UngroupedActiveArcTemplate *template_value)
+{
+    int source_node = 0;
+    int first_student_node = 1;
+    int first_lab_node = first_student_node + template_value->student_count;
+    int sink_node = first_lab_node + template_value->lab_count;
+    int node_count = sink_node + 1;
+    int student_index;
+    int lab_index;
+    int arc_index;
+
+    if (template_value->graph_template_valid) {
+        if (active_profile != NULL) {
+            active_profile->mcf_graph_template_hits++;
+        }
+        return;
+    }
+    if (active_profile != NULL) {
+        active_profile->mcf_graph_template_misses++;
+    }
+
+    template_value->graph_template = mcf_graph_create(node_count);
+    mcf_list_reserve(&template_value->graph_template.adjacency[source_node],
+                     template_value->student_count);
+
+    for (student_index = 0;
+         student_index < template_value->student_count;
+         student_index++) {
+        int student_node = first_student_node + student_index;
+        mcf_list_reserve(
+            &template_value->graph_template.adjacency[student_node],
+            template_value->allowed_counts_by_student[student_index] + 1);
+        mcf_add_edge(&template_value->graph_template,
+                     source_node,
+                     student_node,
+                     1,
+                     cost_zero());
+    }
+
+    for (lab_index = 0; lab_index < template_value->lab_count; lab_index++) {
+        int lab_node = first_lab_node + lab_index;
+        mcf_list_reserve(
+            &template_value->graph_template.adjacency[lab_node],
+            template_value->incoming_counts_by_lab[lab_index]);
+    }
+
+    for (arc_index = 0; arc_index < template_value->arc_count; arc_index++) {
+        ActiveAssignmentArc active_arc = template_value->arcs[arc_index];
+        int student_node = first_student_node + active_arc.student_index;
+        int lab_node = first_lab_node + active_arc.lab_index;
+        AssignmentArc assignment_arc;
+        assignment_arc.student_index = active_arc.student_index;
+        assignment_arc.lab_index = active_arc.lab_index;
+        assignment_arc.edge_index =
+            mcf_add_edge(&template_value->graph_template,
+                         student_node,
+                         lab_node,
+                         1,
+                         cost_zero());
+        ungrouped_graph_template_assignment_arc_push(template_value,
+                                                     assignment_arc);
+    }
+
+    template_value->graph_template_valid = 1;
+}
+
+static void mcf_patch_edge_cost(McfGraph *graph,
+                                int from_node,
+                                int edge_index,
+                                Cost cost)
+{
+    McfEdge *edge;
+    McfEdge *reverse_edge;
+    if (from_node < 0 || from_node >= graph->node_count ||
+        edge_index < 0 ||
+        edge_index >= graph->adjacency[from_node].size) {
+        fail_with_context("mcf graph template", "edge patch index out of range");
+    }
+    edge = &graph->adjacency[from_node].items[edge_index];
+    reverse_edge = &graph->adjacency[edge->to_node].items[edge->reverse_index];
+    edge->cost = cost;
+    reverse_edge->cost = cost_negate(cost);
 }
 
 static void group_assignment_arc_push(GroupAssignmentArcList *list,
@@ -6223,12 +6375,11 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
     int first_student_node = 1;
     int first_lab_node = first_student_node + problem_data->student_count;
     int sink_node = first_lab_node + problem_data->lab_count;
-    int node_count = sink_node + 1;
-    McfGraph graph = mcf_graph_create(node_count);
+    McfGraph graph;
     AssignmentArcList arcs;
     MinCostResult result;
     SolutionResult solution;
-    const UngroupedActiveArcTemplate *active_arc_template =
+    UngroupedActiveArcTemplate *active_arc_template =
         ungrouped_active_arc_template_get(problem_data, best_max_rank);
     int student_index;
     int lab_index;
@@ -6258,6 +6409,9 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
         reward_placement = AVERAGE_REWARD_THIRD;
     }
 
+    ungrouped_active_arc_template_ensure_graph(active_arc_template);
+    graph = mcf_graph_clone(&active_arc_template->graph_template);
+
     solution.assignment = checked_malloc((size_t)problem_data->student_count * sizeof(int));
     solution.lab_counts = checked_calloc((size_t)problem_data->lab_count, sizeof(int));
     solution.total_cost = cost_zero();
@@ -6269,14 +6423,7 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
         fail_with_context("solver", "exact average-fill context is missing");
     }
 
-    mcf_list_reserve(&graph.adjacency[source_node], problem_data->student_count);
     assignment_arc_reserve(&arcs, active_arc_template->arc_count);
-    for (student_index = 0; student_index < problem_data->student_count; student_index++) {
-        int student_node = first_student_node + student_index;
-        mcf_list_reserve(&graph.adjacency[student_node],
-                         active_arc_template
-                             ->allowed_counts_by_student[student_index] + 1);
-    }
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         int lab_node = first_lab_node + lab_index;
         int graph_capacity = problem_data->labs[lab_index].graph_capacity;
@@ -6313,33 +6460,26 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
     mcf_list_reserve(&graph.adjacency[sink_node], sink_reverse_edges);
 
     for (student_index = 0; student_index < problem_data->student_count; student_index++) {
-        int student_node = first_student_node + student_index;
         solution.assignment[student_index] = -1;
-        mcf_add_edge(&graph, source_node, student_node, 1, cost_zero());
     }
 
     for (arc_index = 0;
-         arc_index < active_arc_template->arc_count;
+         arc_index < active_arc_template->assignment_arc_count;
          arc_index++) {
-        ActiveAssignmentArc active_arc =
-            active_arc_template->arcs[arc_index];
-        int student_node = first_student_node + active_arc.student_index;
-        int lab_node = first_lab_node + active_arc.lab_index;
-        int edge_index = mcf_add_edge(&graph,
-                                      student_node,
-                                      lab_node,
-                                      1,
-                                      assignment_rank_cost_scaled(
-                                          problem_data,
-                                          active_arc.student_index,
-                                          active_arc.lab_index,
-                                          rank_cost_model,
-                                          weighted_objective,
-                                          ordinary_third_multiplier));
         AssignmentArc arc;
-        arc.student_index = active_arc.student_index;
-        arc.lab_index = active_arc.lab_index;
-        arc.edge_index = edge_index;
+        int student_node;
+        arc = active_arc_template->assignment_arcs[arc_index];
+        student_node = first_student_node + arc.student_index;
+        mcf_patch_edge_cost(
+            &graph,
+            student_node,
+            arc.edge_index,
+            assignment_rank_cost_scaled(problem_data,
+                                        arc.student_index,
+                                        arc.lab_index,
+                                        rank_cost_model,
+                                        weighted_objective,
+                                        ordinary_third_multiplier));
         assignment_arc_push(&arcs, arc);
     }
 
@@ -13197,6 +13337,12 @@ static void solver_profile_add_child_profile(SolverProfile *profile,
     profile->active_arc_template_misses +=
         read_profile_long_long_or_zero(profile_path,
                                        "active_arc_template_misses");
+    profile->mcf_graph_template_hits +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "mcf_graph_template_hits");
+    profile->mcf_graph_template_misses +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "mcf_graph_template_misses");
     profile->radix_heap_attempts +=
         read_profile_long_long_or_zero(profile_path, "radix_heap_attempts");
     profile->radix_heap_used +=
@@ -13582,6 +13728,12 @@ static void solver_profile_write(const char *profile_path,
         fprintf(profile_file,
                 "active_arc_template_misses\t%lld\n",
                 profile->active_arc_template_misses) < 0 ||
+        fprintf(profile_file,
+                "mcf_graph_template_hits\t%lld\n",
+                profile->mcf_graph_template_hits) < 0 ||
+        fprintf(profile_file,
+                "mcf_graph_template_misses\t%lld\n",
+                profile->mcf_graph_template_misses) < 0 ||
         fprintf(profile_file,
                 "radix_heap_attempts\t%lld\n",
                 profile->radix_heap_attempts) < 0 ||

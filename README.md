@@ -291,7 +291,8 @@ are:
 - `profile.tsv`: graph/flow call counters, threshold candidate counts,
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
   `ordinary_average_scalar_used`, `active_arc_template_hits`,
-  `active_arc_template_misses`, `radix_heap_used`,
+  `active_arc_template_misses`, `mcf_graph_template_hits`,
+  `mcf_graph_template_misses`, `radix_heap_used`,
   `radix_heap_fallbacks`, `average_fill_resource_vectors_tested`,
   `average_fill_resource_vector_limit_hits`,
   branch-and-bound counters, and phase CPU timings.  The legacy
@@ -791,13 +792,17 @@ outside-forbidden target gives a smaller rank upper bound, the weighted
 average-fill scalar safety check uses that active bound rather than the
 outside sentinel.
 
-Repeated ungrouped min-cost-flow solves also reuse an active-arc template for
-the same problem, constraint pointer, and rank threshold.  The template stores
-only the student-to-laboratory topology and adjacency reservation counts.  Edge
-costs, residual capacities, reverse edges, and laboratory lower-bound edges are
-rebuilt for every solve, so the optimization cannot carry residual state across
-objectives or threshold checks.  `--profile` reports
-`active_arc_template_hits` and `active_arc_template_misses`.
+Repeated ungrouped min-cost-flow solves also reuse templates for the same
+problem, constraint pointer, and rank threshold.  The active-arc template stores
+the student-to-laboratory topology and adjacency reservation counts.  A second
+immutable min-cost-flow graph template stores the source-to-student edges and
+student-to-laboratory edges with placeholder costs.  Each solve deep-copies
+that graph, patches only the objective-dependent assignment-edge costs, and
+then adds the laboratory-to-sink lower-bound and reward edges for the current
+minimum-count vector.  Residual capacities, reverse-edge residual flow, and
+laboratory lower-bound edges are never shared across solves.  `--profile`
+reports `active_arc_template_hits`, `active_arc_template_misses`,
+`mcf_graph_template_hits`, and `mcf_graph_template_misses`.
 
 The ordinary min-cost-flow Dijkstra queue uses a radix heap only when the
 current reduced residual costs can be encoded as a monotone unsigned integer
