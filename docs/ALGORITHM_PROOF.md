@@ -184,6 +184,12 @@ feasible set or objective value.
   and lab-to-sink edges.  A single topological relaxation gives the same
   initial potentials as the general queue method; if any positive residual edge
   violates the layer order, the solver falls back.
+- Ungrouped active-arc template reuse: repeated ungrouped solves with the same
+  problem pointer, constraint pointer, and rank threshold reuse only the active
+  student-laboratory arc list and adjacency reservation counts.  Every solve
+  still rebuilds edge costs, residual capacities, reverse edges, and
+  laboratory lower-bound edges, so no residual flow state or objective-specific
+  cost can leak between solves.
 - Portfolio process parallelism: independent exact objective candidates run in
   parallel and are reduced deterministically.
 

@@ -290,7 +290,8 @@ are:
   and `margin`.
 - `profile.tsv`: graph/flow call counters, threshold candidate counts,
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
-  `ordinary_average_scalar_used`,
+  `ordinary_average_scalar_used`, `active_arc_template_hits`,
+  `active_arc_template_misses`,
   branch-and-bound counters, and phase CPU timings.  The legacy
   `weighted_score_comparisons` key is still written as an alias for
   `exact_path_cost_comparisons`.
@@ -776,6 +777,14 @@ plus the forced-placement sentinel rank.  When a max-rank hard target or
 outside-forbidden target gives a smaller rank upper bound, the weighted
 average-fill scalar safety check uses that active bound rather than the
 outside sentinel.
+
+Repeated ungrouped min-cost-flow solves also reuse an active-arc template for
+the same problem, constraint pointer, and rank threshold.  The template stores
+only the student-to-laboratory topology and adjacency reservation counts.  Edge
+costs, residual capacities, reverse edges, and laboratory lower-bound edges are
+rebuilt for every solve, so the optimization cannot carry residual state across
+objectives or threshold checks.  `--profile` reports
+`active_arc_template_hits` and `active_arc_template_misses`.
 
 ## Reproducible Verification
 

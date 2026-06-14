@@ -60,6 +60,11 @@ safety conditions are not met.
 - Initial min-cost-flow potentials use layered DAG relaxation on fresh
   assignment graphs and fall back to the previous queue method if the graph is
   not in layer order.
+- Repeated ungrouped min-cost-flow solves reuse an active-arc template keyed by
+  the problem pointer, constraint pointer, and rank threshold.  The template
+  stores only active student-laboratory arcs and adjacency reservation counts;
+  costs, residual capacities, reverse edges, and lower-bound sink edges are
+  rebuilt for every solve.
 - Weighted-exact can seed its incumbent with additional light exact objectives
   on larger threshold grids.  These seeds are upper bounds for pruning only;
   the final solution is still certified by branch-and-bound.
@@ -96,10 +101,12 @@ unsafe.
 
 - Cache student groups across threshold and ratio checks when the grouping key
   includes all state that affects allowed edges and costs.
-- Reuse immutable min-cost-flow graph templates for repeated solves with the
-  same rank threshold and different minimum-count vectors.  This remains a
-  future step because residual capacities and reverse-edge ownership must stay
-  isolated for ASan-clean repeated solves.
+- Extend active-arc template reuse to grouped solves only after the group-cache
+  key also carries a stable generation identifier.  Pointer identity alone is
+  not enough for stack-allocated `StudentGroups`.
+- Reuse fuller immutable min-cost-flow graph templates only if residual
+  capacities and reverse-edge ownership remain isolated for ASan-clean repeated
+  solves.
 - Represent student group signatures sparsely for short preference lists.
 - Investigate outside-preference edge compression only under strict conditions
   that preserve listed-vs-unlisted laboratory identity.
@@ -116,7 +123,9 @@ unsafe.
 - `exact_path_cost_comparisons`: exact average-fill comparator pressure.
 - `biguint_score_comparisons`: weighted exact score-comparison pressure.
 - `student_group_builds`: opportunity for group cache or sparse signatures.
-- `mcf_edges_added`: opportunity for graph templates or sparse arcs.
+- `active_arc_template_hits` and `active_arc_template_misses`: topology reuse
+  for repeated ungrouped min-cost-flow solves.
+- `mcf_edges_added`: opportunity for fuller graph templates or sparse arcs.
 - `min_cost_flow_calls`: opportunity for repeated-solve reduction.
 - `dinic_calls`: opportunity for improved threshold feasibility checks.
 - `weighted_bound_prunes`: quality of branch-and-bound lower bounds and seeds.

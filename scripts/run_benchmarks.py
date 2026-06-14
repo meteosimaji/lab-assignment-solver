@@ -145,6 +145,8 @@ FIELDNAMES = [
     "ordinary_average_scalar_used",
     "ordinary_average_scalar_fallback_lcm",
     "ordinary_average_scalar_fallback_overflow",
+    "active_arc_template_hits",
+    "active_arc_template_misses",
 ]
 
 
@@ -312,6 +314,8 @@ def run_case_once(case, repeat_index, binary, bench_dir):
         "ordinary_average_scalar_fallback_overflow": profile.get(
             "ordinary_average_scalar_fallback_overflow", ""
         ),
+        "active_arc_template_hits": profile.get("active_arc_template_hits", ""),
+        "active_arc_template_misses": profile.get("active_arc_template_misses", ""),
     }
 
 

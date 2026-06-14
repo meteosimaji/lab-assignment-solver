@@ -1533,6 +1533,40 @@ C 2
     assert "integer-only weighted min-cost flow" in explain_rank_only.stdout
 
 
+def test_profile_reports_active_arc_template_reuse(tmp_path):
+    lab_text = """\
+3
+A 2
+B 2
+C 2
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A C
+00003 B C
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "fair",
+            "--require-average-rank-at-most",
+            "2.0",
+            "--profile",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    profile = read_profile(output_path)
+    assert "active_arc_template_hits" in profile
+    assert "active_arc_template_misses" in profile
+    assert int(profile["active_arc_template_hits"]) > 0
+    assert int(profile["active_arc_template_misses"]) > 0
+
+
 def test_ordinary_average_scalar_fast_path_is_used(tmp_path):
     lab_text = """\
 3

@@ -1046,7 +1046,16 @@ grouped flow is expanded back to concrete student ids after optimization.
 This reduces the graph from \(N\) student nodes to \(G\leq N\) group nodes
 without changing any objective value.
 
-Seventh, the rubric objective uses monotonicity in the minimum-fill threshold
+Seventh, repeated ungrouped min-cost-flow solves reuse an active-arc template
+when the problem pointer, constraint pointer, and rank threshold are unchanged.
+The template contains only the student--laboratory arc list and adjacency
+reservation counts.  It does not contain edge costs, residual capacities,
+reverse edges, or laboratory lower-bound sink edges; all of those are rebuilt
+for each solve.  Therefore the reuse cannot transfer residual flow state or an
+objective-specific cost from one threshold check to another.  It only removes a
+duplicate scan of the active edge set.
+
+Eighth, the rubric objective uses monotonicity in the minimum-fill threshold
 after the optimal average fill-rate has been fixed.  Let \(A(u)\) be the
 maximum average fill-rate achievable while preserving the already fixed
 rank-cost target and requiring \(U_{\min}\ge u\).  If \(u_1\le u_2\), the
@@ -1057,7 +1066,7 @@ short sequential prefix followed by exponential and binary search.  Every
 accepted point is still solved by the exact flow optimizer, so this only
 removes redundant threshold probes.
 
-Eighth, if all students have identical rank rows, the program uses a closed
+Ninth, if all students have identical rank rows, the program uses a closed
 count-based solver.  The check costs only \(O(NM)\) comparisons, which is the
 same order as reading the rank table once.  When the check succeeds, each
 student is interchangeable with every other student, so the assignment

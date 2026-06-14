@@ -165,6 +165,25 @@ typedef struct {
 } AssignmentArcList;
 
 typedef struct {
+    int student_index;
+    int lab_index;
+} ActiveAssignmentArc;
+
+typedef struct {
+    int valid;
+    const ProblemData *problem_data;
+    const ConstraintSet *constraints;
+    int best_max_rank;
+    int student_count;
+    int lab_count;
+    ActiveAssignmentArc *arcs;
+    int arc_count;
+    int arc_capacity;
+    int *allowed_counts_by_student;
+    int *incoming_counts_by_lab;
+} UngroupedActiveArcTemplate;
+
+typedef struct {
     int total_flow;
     Cost total_cost;
 } MinCostResult;
@@ -361,6 +380,8 @@ typedef struct {
     long long ordinary_average_scalar_fallback_lcm;
     long long ordinary_average_scalar_fallback_overflow;
     long long ordinary_average_scalar_fallback_not_applicable;
+    long long active_arc_template_hits;
+    long long active_arc_template_misses;
     long long weighted_bound_prunes;
     long long weighted_corner_cache_hits;
     long long weighted_corner_cache_misses;
@@ -3523,6 +3544,114 @@ static int assignment_edge_allowed(const ProblemData *problem_data,
     return rank_value <= max_rank;
 }
 
+static UngroupedActiveArcTemplate ungrouped_active_arc_template_cache;
+
+static void ungrouped_active_arc_template_clear(
+    UngroupedActiveArcTemplate *template_value)
+{
+    free(template_value->arcs);
+    free(template_value->allowed_counts_by_student);
+    free(template_value->incoming_counts_by_lab);
+    memset(template_value, 0, sizeof(*template_value));
+}
+
+static void active_assignment_arc_template_push(
+    UngroupedActiveArcTemplate *template_value,
+    int student_index,
+    int lab_index)
+{
+    ActiveAssignmentArc arc;
+    if (template_value->arc_count == template_value->arc_capacity) {
+        int new_capacity =
+            template_value->arc_capacity == 0 ?
+            256 :
+            template_value->arc_capacity * 2;
+        if (new_capacity < template_value->arc_capacity) {
+            fail_with_context("active arc template", "capacity overflow");
+        }
+        template_value->arcs =
+            checked_realloc(template_value->arcs,
+                            (size_t)new_capacity *
+                                sizeof(ActiveAssignmentArc));
+        template_value->arc_capacity = new_capacity;
+    }
+    arc.student_index = student_index;
+    arc.lab_index = lab_index;
+    template_value->arcs[template_value->arc_count] = arc;
+    template_value->arc_count++;
+}
+
+static int ungrouped_active_arc_template_matches(
+    const UngroupedActiveArcTemplate *template_value,
+    const ProblemData *problem_data,
+    int best_max_rank)
+{
+    return template_value->valid &&
+           template_value->problem_data == problem_data &&
+           template_value->constraints == problem_data->constraints &&
+           template_value->best_max_rank == best_max_rank &&
+           template_value->student_count == problem_data->student_count &&
+           template_value->lab_count == problem_data->lab_count;
+}
+
+static const UngroupedActiveArcTemplate *ungrouped_active_arc_template_get(
+    const ProblemData *problem_data,
+    int best_max_rank)
+{
+    int student_index;
+    int lab_index;
+
+    if (ungrouped_active_arc_template_matches(
+            &ungrouped_active_arc_template_cache,
+            problem_data,
+            best_max_rank)) {
+        if (active_profile != NULL) {
+            active_profile->active_arc_template_hits++;
+        }
+        return &ungrouped_active_arc_template_cache;
+    }
+
+    ungrouped_active_arc_template_clear(&ungrouped_active_arc_template_cache);
+    ungrouped_active_arc_template_cache.problem_data = problem_data;
+    ungrouped_active_arc_template_cache.constraints = problem_data->constraints;
+    ungrouped_active_arc_template_cache.best_max_rank = best_max_rank;
+    ungrouped_active_arc_template_cache.student_count =
+        problem_data->student_count;
+    ungrouped_active_arc_template_cache.lab_count = problem_data->lab_count;
+    ungrouped_active_arc_template_cache.allowed_counts_by_student =
+        checked_calloc((size_t)problem_data->student_count, sizeof(int));
+    ungrouped_active_arc_template_cache.incoming_counts_by_lab =
+        checked_calloc((size_t)problem_data->lab_count, sizeof(int));
+
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        for (lab_index = 0;
+             lab_index < problem_data->lab_count;
+             lab_index++) {
+            if (assignment_edge_allowed(problem_data,
+                                        student_index,
+                                        lab_index,
+                                        best_max_rank)) {
+                ungrouped_active_arc_template_cache
+                    .allowed_counts_by_student[student_index]++;
+                ungrouped_active_arc_template_cache
+                    .incoming_counts_by_lab[lab_index]++;
+                active_assignment_arc_template_push(
+                    &ungrouped_active_arc_template_cache,
+                    student_index,
+                    lab_index);
+            }
+        }
+    }
+
+    ungrouped_active_arc_template_cache.valid = 1;
+    if (active_profile != NULL) {
+        active_profile->active_arc_template_misses++;
+    }
+    return &ungrouped_active_arc_template_cache;
+}
+
 static int all_students_have_identical_rank_rows(const ProblemData *problem_data)
 {
     int student_index;
@@ -5652,14 +5781,11 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
     AssignmentArcList arcs;
     MinCostResult result;
     SolutionResult solution;
+    const UngroupedActiveArcTemplate *active_arc_template =
+        ungrouped_active_arc_template_get(problem_data, best_max_rank);
     int student_index;
     int lab_index;
     int arc_index;
-    int *allowed_counts_by_student =
-        checked_calloc((size_t)problem_data->student_count, sizeof(int));
-    int *incoming_counts_by_lab =
-        checked_calloc((size_t)problem_data->lab_count, sizeof(int));
-    int total_assignment_arcs = 0;
     int sink_reverse_edges = 0;
     int use_ordinary_average_scalar =
         optimize_fill_average &&
@@ -5696,22 +5822,13 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
         fail_with_context("solver", "exact average-fill context is missing");
     }
 
-    for (student_index = 0; student_index < problem_data->student_count; student_index++) {
-        for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
-            if (assignment_edge_allowed(problem_data, student_index, lab_index, best_max_rank)) {
-                allowed_counts_by_student[student_index]++;
-                incoming_counts_by_lab[lab_index]++;
-                total_assignment_arcs++;
-            }
-        }
-    }
-
     mcf_list_reserve(&graph.adjacency[source_node], problem_data->student_count);
-    assignment_arc_reserve(&arcs, total_assignment_arcs);
+    assignment_arc_reserve(&arcs, active_arc_template->arc_count);
     for (student_index = 0; student_index < problem_data->student_count; student_index++) {
         int student_node = first_student_node + student_index;
         mcf_list_reserve(&graph.adjacency[student_node],
-                         allowed_counts_by_student[student_index] + 1);
+                         active_arc_template
+                             ->allowed_counts_by_student[student_index] + 1);
     }
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         int lab_node = first_lab_node + lab_index;
@@ -5723,8 +5840,6 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
                 free(solution.assignment);
                 free(solution.lab_counts);
                 free(arcs.items);
-                free(allowed_counts_by_student);
-                free(incoming_counts_by_lab);
                 mcf_graph_free(&graph);
                 if (fail_on_infeasible) {
                     fail_with_context("solver", "invalid lab minimum count");
@@ -5744,37 +5859,41 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
         }
         sink_reverse_edges += slot_edge_count;
         mcf_list_reserve(&graph.adjacency[lab_node],
-                         incoming_counts_by_lab[lab_index] + slot_edge_count);
+                         active_arc_template
+                             ->incoming_counts_by_lab[lab_index] +
+                             slot_edge_count);
     }
     mcf_list_reserve(&graph.adjacency[sink_node], sink_reverse_edges);
-    free(allowed_counts_by_student);
-    free(incoming_counts_by_lab);
 
     for (student_index = 0; student_index < problem_data->student_count; student_index++) {
         int student_node = first_student_node + student_index;
         solution.assignment[student_index] = -1;
         mcf_add_edge(&graph, source_node, student_node, 1, cost_zero());
-        for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
-            if (assignment_edge_allowed(problem_data, student_index, lab_index, best_max_rank)) {
-                int lab_node = first_lab_node + lab_index;
-                int edge_index = mcf_add_edge(&graph,
-                                              student_node,
-                                              lab_node,
-                                              1,
-                                              assignment_rank_cost_scaled(
-                                                  problem_data,
-                                                  student_index,
-                                                  lab_index,
-                                                  rank_cost_model,
-                                                  weighted_objective,
-                                                  ordinary_third_multiplier));
-                AssignmentArc arc;
-                arc.student_index = student_index;
-                arc.lab_index = lab_index;
-                arc.edge_index = edge_index;
-                assignment_arc_push(&arcs, arc);
-            }
-        }
+    }
+
+    for (arc_index = 0;
+         arc_index < active_arc_template->arc_count;
+         arc_index++) {
+        ActiveAssignmentArc active_arc =
+            active_arc_template->arcs[arc_index];
+        int student_node = first_student_node + active_arc.student_index;
+        int lab_node = first_lab_node + active_arc.lab_index;
+        int edge_index = mcf_add_edge(&graph,
+                                      student_node,
+                                      lab_node,
+                                      1,
+                                      assignment_rank_cost_scaled(
+                                          problem_data,
+                                          active_arc.student_index,
+                                          active_arc.lab_index,
+                                          rank_cost_model,
+                                          weighted_objective,
+                                          ordinary_third_multiplier));
+        AssignmentArc arc;
+        arc.student_index = active_arc.student_index;
+        arc.lab_index = active_arc.lab_index;
+        arc.edge_index = edge_index;
+        assignment_arc_push(&arcs, arc);
     }
 
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
@@ -11842,6 +11961,12 @@ static void solver_profile_add_child_profile(SolverProfile *profile,
         read_profile_long_long_or_zero(
             profile_path,
             "ordinary_average_scalar_fallback_not_applicable");
+    profile->active_arc_template_hits +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "active_arc_template_hits");
+    profile->active_arc_template_misses +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "active_arc_template_misses");
     profile->weighted_bound_prunes +=
         read_profile_long_long_or_zero(profile_path, "weighted_bound_prunes");
     profile->weighted_corner_cache_hits +=
@@ -12207,6 +12332,12 @@ static void solver_profile_write(const char *profile_path,
         fprintf(profile_file,
                 "ordinary_average_scalar_fallback_not_applicable\t%lld\n",
                 profile->ordinary_average_scalar_fallback_not_applicable) < 0 ||
+        fprintf(profile_file,
+                "active_arc_template_hits\t%lld\n",
+                profile->active_arc_template_hits) < 0 ||
+        fprintf(profile_file,
+                "active_arc_template_misses\t%lld\n",
+                profile->active_arc_template_misses) < 0 ||
         fprintf(profile_file,
                 "weighted_bound_prunes\t%lld\n",
                 profile->weighted_bound_prunes) < 0 ||
@@ -13733,6 +13864,7 @@ int main(int argc, char **argv)
         constraint_set_free(&constraints);
     }
     rank_cost_model_free(&options.rank_cost_model);
+    ungrouped_active_arc_template_clear(&ungrouped_active_arc_template_cache);
     free_problem_data(&problem_data);
     active_profile = NULL;
     return EXIT_SUCCESS;
