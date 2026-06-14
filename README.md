@@ -372,8 +372,10 @@ bounds.  `average_fill_rate` hard targets are intentionally not enabled for
 arbitrary objectives yet because they are global rational side constraints.
 Likewise, rank-square, outside-count above zero, and changed-student-count hard
 targets are rejected until an exact resource-constrained engine is enabled for
-them.  Unsupported combinations are rejected instead of silently becoming
-heuristics.
+them.  Average-rank and rank-sum hard targets are also rejected with a positive
+`--change-penalty`, because the current rank-first cost component then becomes
+`rank_sum + change_penalty * changed_students` rather than the pure rank sum.
+Unsupported combinations are rejected instead of silently becoming heuristics.
 
 The default objective is `rubric`, aligned with common evaluation metrics:
 

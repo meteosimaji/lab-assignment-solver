@@ -25,8 +25,17 @@ safety conditions are not met.
 - Minimum-fill hard targets prune generated fill-ratio candidates below the
   required lower bound.  All lower ratios map to the same target-clamped
   minimum-count vector, so this preserves the feasible-region search exactly.
+- Minimum-fill ratio generation also skips ratios above safe infeasibility
+  bounds from total student count and per-laboratory graph capacity.  Such
+  ratios cannot produce a feasible lower-bound vector.
 - Structural hard targets are prechecked with the existing lower-bound
   feasibility flow before expensive objective-specific solves.
+- That structural precheck is skipped when an average-rank or rank-sum hard
+  target is present, because the later rank-sum min-cost-flow feasibility check
+  is stronger and would otherwise duplicate the same structural proof.
+- Average-rank and rank-sum hard targets are rejected with positive
+  `--change-penalty`.  In that mode the rank-first cost component contains the
+  change term, so comparing it with a pure rank-sum bound would be incorrect.
 - Weighted-exact branch-and-bound splits boxes by weighted objective spread
   (`max_rank` spread versus `minimum_fill` spread) before falling back to index
   width.  This changes only search order, not the lower-bound proof.

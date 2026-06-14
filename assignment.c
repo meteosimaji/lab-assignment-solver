@@ -3634,10 +3634,20 @@ static int has_feasible_assignment(const ProblemData *problem_data, int max_rank
 static int target_constraints_have_structural_bound(
     const TargetConstraints *targets)
 {
-    return targets != NULL &&
-           (targets->has_max_rank_max ||
-            targets->has_minimum_fill_min ||
-            targets->has_outside_max);
+    if (targets == NULL) {
+        return 0;
+    }
+    /*
+      Rank-sum-like targets are checked by a stronger min-cost-flow solve later.
+      That solve already includes structural max-rank, minimum-fill, and
+      no-outside constraints, so a separate Dinic precheck would duplicate work.
+    */
+    if (targets->has_average_rank_max || targets->has_rank_sum_max) {
+        return 0;
+    }
+    return targets->has_max_rank_max ||
+           targets->has_minimum_fill_min ||
+           targets->has_outside_max;
 }
 
 static void precheck_structural_target_constraints(
@@ -5895,7 +5905,10 @@ static RatioList build_ratio_candidates(const ProblemData *problem_data)
 {
     const TargetConstraints *targets = problem_data->targets;
     RatioValue lower_bound;
+    RatioValue upper_bound;
     int has_lower_bound = 0;
+    int total_capacity_bound_is_available = 1;
+    long long total_positive_capacity = 0LL;
     int lab_index;
     RatioList list;
     list.items = NULL;
@@ -5904,10 +5917,43 @@ static RatioList build_ratio_candidates(const ProblemData *problem_data)
 
     lower_bound.numerator = 0LL;
     lower_bound.denominator = 1LL;
+    upper_bound.numerator = 1LL;
+    upper_bound.denominator = 1LL;
     if (targets != NULL && targets->has_minimum_fill_min) {
         lower_bound = targets->minimum_fill_min;
         has_lower_bound = 1;
         ratio_list_push(&list, lower_bound);
+    }
+
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        long long capacity_value = problem_data->labs[lab_index].capacity_value;
+        RatioValue lab_upper_bound;
+        if (capacity_value <= 0LL) {
+            continue;
+        }
+        if (total_capacity_bound_is_available) {
+            if (capacity_value > LLONG_MAX - total_positive_capacity) {
+                total_capacity_bound_is_available = 0;
+            } else {
+                total_positive_capacity += capacity_value;
+            }
+        }
+        lab_upper_bound.numerator =
+            (long long)problem_data->labs[lab_index].graph_capacity;
+        lab_upper_bound.denominator = capacity_value;
+        lab_upper_bound = ratio_value_reduce(lab_upper_bound);
+        if (ratio_compare_value(lab_upper_bound, upper_bound) < 0) {
+            upper_bound = lab_upper_bound;
+        }
+    }
+    if (total_capacity_bound_is_available && total_positive_capacity > 0LL) {
+        RatioValue total_upper_bound;
+        total_upper_bound.numerator = (long long)problem_data->student_count;
+        total_upper_bound.denominator = total_positive_capacity;
+        total_upper_bound = ratio_value_reduce(total_upper_bound);
+        if (ratio_compare_value(total_upper_bound, upper_bound) < 0) {
+            upper_bound = total_upper_bound;
+        }
     }
 
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
@@ -5923,6 +5969,9 @@ static RatioList build_ratio_candidates(const ProblemData *problem_data)
             ratio.denominator = capacity_value;
             if (has_lower_bound &&
                 ratio_compare_value(ratio, lower_bound) < 0) {
+                continue;
+            }
+            if (ratio_compare_value(ratio, upper_bound) > 0) {
                 continue;
             }
             ratio_list_push(&list, ratio);
@@ -12187,6 +12236,11 @@ static void validate_target_constraints_supported_for_run(
             "only --require-outside-at-most 0 is currently supported exactly");
     }
     if (target_constraints_have_rank_sum_like_bound(targets)) {
+        if (options->change_penalty > 0LL) {
+            fail_with_context(
+                "target constraints",
+                "average-rank/rank-sum hard targets are not currently exact with --change-penalty");
+        }
         if (options->portfolio_mode) {
             fail_with_context(
                 "target constraints",

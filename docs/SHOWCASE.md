@@ -191,11 +191,11 @@ Representative rows from the current benchmark table:
 
 | Case | Wall time | Avg rank | Rank stddev | Max rank | Avg fill | Min fill | Exact path comparisons |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `uniform_256x1024_rubric` | 1.861s | 1.308 | 0.510 | 3 | 0.873 | 0.111 | 32,577,654 |
-| `popular_256x1024_rubric` | 2.283s | 2.861 | 1.747 | 8 | 0.869 | 0.111 | 40,797,870 |
-| `popular_256x1024_fair` | 0.786s | 2.939 | 1.644 | 6 | 0.867 | 0.111 | 18,186,622 |
-| `popular_256x1024_weighted_evaluation` | 3.978s | 2.882 | 1.672 | 8 | 0.868 | 0.111 | 0 |
-| `popular_128x512_portfolio_jobs4` | 0.536s | 2.803 | 1.599 | 6 | 0.871 | 0.143 | 64,084,680 |
+| `uniform_256x1024_rubric` | 1.945s | 1.308 | 0.510 | 3 | 0.873 | 0.111 | 32,577,654 |
+| `popular_256x1024_rubric` | 2.362s | 2.861 | 1.747 | 8 | 0.869 | 0.111 | 40,797,870 |
+| `popular_256x1024_fair` | 0.797s | 2.939 | 1.644 | 6 | 0.867 | 0.111 | 18,186,622 |
+| `popular_256x1024_weighted_evaluation` | 4.137s | 2.882 | 1.672 | 8 | 0.868 | 0.111 | 0 |
+| `popular_128x512_portfolio_jobs4` | 0.548s | 2.803 | 1.599 | 6 | 0.871 | 0.143 | 64,084,680 |
 
 ## 6. Source Archive Hygiene
 

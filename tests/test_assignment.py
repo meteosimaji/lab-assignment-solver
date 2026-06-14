@@ -1715,6 +1715,54 @@ B 2
     assert "00001\tA\tB" in adjustment_text
 
 
+def test_rank_sum_target_rejects_positive_change_penalty(tmp_path):
+    lab_text = """\
+2
+A 1
+B 1
+"""
+    preference_text = """\
+2 2
+00001 A B
+00002 B A
+"""
+    base_text = """\
+2
+00001 B
+00002 A
+"""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lab_path = tmp_path / "labs.txt"
+    preference_path = tmp_path / "preferences.txt"
+    base_path = tmp_path / "base.txt"
+    output_path = tmp_path / "out.txt"
+    write_text(lab_path, lab_text)
+    write_text(preference_path, preference_text)
+    write_text(base_path, base_text)
+    completed = subprocess.run(
+        [
+            str(BINARY),
+            str(lab_path),
+            str(preference_path),
+            str(output_path),
+            "--objective",
+            "rubric",
+            "--base-assignment",
+            str(base_path),
+            "--change-penalty",
+            "100",
+            "--require-average-rank-at-most",
+            "1",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "not currently exact with --change-penalty" in completed.stderr
+    assert not output_path.exists()
+
+
 def test_normalized_student_ids_work_in_constraints_base_and_explain(tmp_path):
     lab_text = """\
 2
