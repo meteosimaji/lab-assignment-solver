@@ -1533,6 +1533,154 @@ C 2
     assert "integer-only weighted min-cost flow" in explain_rank_only.stdout
 
 
+def test_ordinary_average_scalar_fast_path_is_used(tmp_path):
+    lab_text = """\
+3
+A 4
+B 5
+C 6
+"""
+    preference_text = """\
+6 3
+00001 A B C
+00002 A B C
+00003 A C B
+00004 B A C
+00005 C B A
+00006 C A B
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=["--objective", "rubric", "--profile"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    profile = read_profile(output_path)
+    assert int(profile["ordinary_average_scalar_attempts"]) > 0
+    assert int(profile["ordinary_average_scalar_used"]) > 0
+    assert int(profile["ordinary_average_scalar_fallback_lcm"]) == 0
+    assert int(profile["exact_min_cost_flow_calls"]) == 0
+    assert int(profile["exact_path_cost_comparisons"]) == 0
+
+
+def test_ordinary_average_scalar_fast_path_falls_back_on_large_lcm(tmp_path):
+    lab_text = """\
+4
+A 1000000007
+B 1000000009
+C 1000000033
+D 1000000087
+"""
+    preference_text = """\
+8 4
+00001 A B C D
+00002 A B C D
+00003 B A C D
+00004 B C A D
+00005 C A B D
+00006 C D A B
+00007 D A B C
+00008 D C B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=["--objective", "rubric", "--profile"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    profile = read_profile(output_path)
+    assert int(profile["ordinary_average_scalar_attempts"]) > 0
+    assert int(profile["ordinary_average_scalar_used"]) == 0
+    assert int(profile["ordinary_average_scalar_fallback_lcm"]) > 0
+    assert int(profile["exact_min_cost_flow_calls"]) > 0
+    assert int(profile["exact_path_cost_comparisons"]) > 0
+
+
+def test_ordinary_average_scalar_fast_path_uses_active_rank_bound_for_satisfaction(tmp_path):
+    lab_text = """\
+8
+A 4
+B 5
+C 6
+D 7
+E 8
+F 9
+G 10
+H 11
+"""
+    preference_text = """\
+16 8
+00001 A B C D E F G H
+00002 A C B D E F G H
+00003 B A C D E F G H
+00004 B C D A E F G H
+00005 C B A D E F G H
+00006 C D E F G H A B
+00007 D C B A E F G H
+00008 D E F G H A B C
+00009 E D C B A F G H
+00010 E F G H A B C D
+00011 F E D C B A G H
+00012 F G H A B C D E
+00013 G F E D C B A H
+00014 G H A B C D E F
+00015 H G F E D C B A
+00016 H A B C D E F G
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "satisfaction",
+            "--rank-costs",
+            str(ROOT / "rank_costs" / "student_friendly.txt"),
+            "--profile",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    profile = read_profile(output_path)
+    assert int(profile["ordinary_average_scalar_attempts"]) > 0
+    assert int(profile["ordinary_average_scalar_used"]) > 0
+    assert int(profile["ordinary_average_scalar_fallback_overflow"]) == 0
+    assert int(profile["exact_path_cost_comparisons"]) == 0
+
+
+def test_ordinary_average_scalar_fast_path_uses_capacity_aware_reward_bound(tmp_path):
+    student_count = 500
+    lab_text = """\
+2
+A 1
+B 1000000000000
+"""
+    preference_rows = [
+        f"{index:05d} B A"
+        for index in range(1, student_count + 1)
+    ]
+    preference_text = (
+        f"{student_count} 2\n" + "\n".join(preference_rows) + "\n"
+    )
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=["--objective", "rubric", "--profile"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    profile = read_profile(output_path)
+    assert int(profile["ordinary_average_scalar_attempts"]) > 0
+    assert int(profile["ordinary_average_scalar_used"]) > 0
+    assert int(profile["ordinary_average_scalar_fallback_overflow"]) == 0
+    assert int(profile["exact_path_cost_comparisons"]) == 0
+
+
 def test_weight_file_preset_is_accepted(tmp_path):
     lab_text = """\
 3

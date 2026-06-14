@@ -625,6 +625,39 @@ index and a coefficient \(-1\).  During shortest-path comparisons, the solver
 compares the accumulated coefficient vectors by evaluating the corresponding
 big-integer weighted sums exactly.
 
+There is also a scalar fast path for ordinary rank-first objectives.  Let
+\[
+  U_s(x)=\sum_{j\in P} n_j W_j
+\]
+be the exact scaled fill reward and let \(T(x)\) be the already lower-priority
+rank-square or dissatisfaction-square component.  If \(L\), all \(W_j\), and
+the required arithmetic bounds fit in signed integer costs, the solver chooses
+\[
+  M > \max_{x,y}|U_s(x)-U_s(y)|
+\]
+and replaces the final pair \((T,-U_s)\) by the single integer
+\[
+  T M - U_s.
+\]
+If \(T(x)<T(y)\), then \(T(y)-T(x)\ge 1\), so the \(M\) gap cannot be reversed
+by any possible fill-reward difference.  If \(T(x)=T(y)\), minimizing
+\(TM-U_s\) is exactly the same as maximizing \(U_s\).  Therefore this fast
+path preserves the same lexicographic order.  If any safety check fails, the
+solver uses the big-integer comparison path described above.
+
+The implementation uses two exact-preserving refinements to make this safety
+test less conservative.  First, under a fixed max-rank threshold \(q\), edges
+with rank greater than \(q\) are not inserted into the flow graph.  Overflow
+and big-\(M\) bounds therefore need only consider rank costs for active ranks
+\(1,\ldots,q\).  Second, the fill-reward difference bound is computed from
+capacity-limited reward slots.  Each positive-capacity laboratory \(j\)
+contributes \(g_j\) slots of reward \(W_j\), where \(g_j\) is its graph
+capacity.  Every complete assignment selects exactly \(N\) such slots, so the
+sum of the largest \(N\) slot rewards is an upper bound on \(U_s\), and the
+sum of the smallest \(N\) slot rewards is a lower bound.  Their difference is
+a valid \(D\) for the proof above and is no larger than the coarser
+\(N(\max_j W_j-\min_j W_j)\) bound.
+
 \begin{theorem}[Exact fill tie-breakers]
 After the rank-side prefix of a selected objective mode has been fixed, the
 solver applies the selected fill tie-breaker exactly.  For average-first modes

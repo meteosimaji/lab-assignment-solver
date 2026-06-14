@@ -319,6 +319,23 @@ typedef struct {
 } WeightedAverageFastPath;
 
 typedef struct {
+    int available;
+    long long third_multiplier;
+    long long *lab_average_rewards;
+} OrdinaryAverageFastPath;
+
+typedef enum {
+    AVERAGE_REWARD_NONE,
+    AVERAGE_REWARD_SECOND,
+    AVERAGE_REWARD_THIRD
+} AverageRewardPlacement;
+
+typedef struct {
+    long long reward;
+    int capacity;
+} AverageRewardBucket;
+
+typedef struct {
     long long total_graph_capacity;
     long long student_count;
     long long per_unit_limit;
@@ -336,6 +353,11 @@ typedef struct {
     long long minimum_candidates_tested;
     long long exact_path_cost_comparisons;
     long long biguint_score_comparisons;
+    long long ordinary_average_scalar_attempts;
+    long long ordinary_average_scalar_used;
+    long long ordinary_average_scalar_fallback_lcm;
+    long long ordinary_average_scalar_fallback_overflow;
+    long long ordinary_average_scalar_fallback_not_applicable;
     long long weighted_bound_prunes;
     long long weighted_corner_cache_hits;
     long long weighted_corner_cache_misses;
@@ -4927,11 +4949,12 @@ static void validate_rank_cost_model(const ProblemData *problem_data,
     }
 }
 
-static Cost assignment_rank_cost(const ProblemData *problem_data,
-                                 int student_index,
-                                 int lab_index,
-                                 const RankCostModel *rank_cost_model,
-                                 const WeightedObjective *weighted_objective)
+static Cost assignment_rank_cost_scaled(const ProblemData *problem_data,
+                                        int student_index,
+                                        int lab_index,
+                                        const RankCostModel *rank_cost_model,
+                                        const WeightedObjective *weighted_objective,
+                                        long long ordinary_third_multiplier)
 {
     int rank_value = rank_for_assignment(problem_data, student_index, lab_index);
     int changed_from_base =
@@ -4949,6 +4972,12 @@ static Cost assignment_rank_cost(const ProblemData *problem_data,
             checked_multiply_rank_cost(dissatisfaction,
                                        dissatisfaction,
                                        "rank satisfaction cost");
+        if (ordinary_third_multiplier != 1LL) {
+            square_cost =
+                checked_cost_component_multiply(square_cost,
+                                                ordinary_third_multiplier,
+                                                "ordinary average-fill scalar fast path");
+        }
         if (changed_from_base && problem_data->change_penalty > 0LL) {
             primary_cost =
                 checked_add_weighted_term(primary_cost,
@@ -4985,14 +5014,360 @@ static Cost assignment_rank_cost(const ProblemData *problem_data,
     }
 }
 
-static Cost lab_sink_cost_with_average_reward(long long minimum_fill_component,
-                                              int lab_index,
-                                              const long long *lab_average_rewards)
+static Cost assignment_rank_cost(const ProblemData *problem_data,
+                                 int student_index,
+                                 int lab_index,
+                                 const RankCostModel *rank_cost_model,
+                                 const WeightedObjective *weighted_objective)
+{
+    return assignment_rank_cost_scaled(problem_data,
+                                       student_index,
+                                       lab_index,
+                                       rank_cost_model,
+                                       weighted_objective,
+                                       1LL);
+}
+
+static Cost lab_sink_cost_with_reward(long long minimum_fill_component,
+                                      int lab_index,
+                                      const long long *lab_average_rewards,
+                                      AverageRewardPlacement placement)
 {
     long long average_reward = lab_average_rewards == NULL ?
                                0LL :
                                lab_average_rewards[lab_index];
-    return cost_make(minimum_fill_component, -average_reward, 0LL);
+    if (placement == AVERAGE_REWARD_SECOND) {
+        return cost_make(minimum_fill_component, -average_reward, 0LL);
+    }
+    if (placement == AVERAGE_REWARD_THIRD) {
+        return cost_make(minimum_fill_component, 0LL, -average_reward);
+    }
+    return cost_make(minimum_fill_component, 0LL, 0LL);
+}
+
+static void ordinary_average_fast_path_free(OrdinaryAverageFastPath *fast_path)
+{
+    free(fast_path->lab_average_rewards);
+    fast_path->lab_average_rewards = NULL;
+    fast_path->available = 0;
+    fast_path->third_multiplier = 1LL;
+}
+
+static int average_reward_bucket_compare_ascending(const void *left,
+                                                   const void *right)
+{
+    const AverageRewardBucket *left_bucket =
+        (const AverageRewardBucket *)left;
+    const AverageRewardBucket *right_bucket =
+        (const AverageRewardBucket *)right;
+    if (left_bucket->reward < right_bucket->reward) {
+        return -1;
+    }
+    if (left_bucket->reward > right_bucket->reward) {
+        return 1;
+    }
+    return 0;
+}
+
+static int average_reward_bucket_compare_descending(const void *left,
+                                                    const void *right)
+{
+    return -average_reward_bucket_compare_ascending(left, right);
+}
+
+static int sum_extreme_average_rewards(const AverageRewardBucket *buckets,
+                                       int bucket_count,
+                                       int student_count,
+                                       int descending,
+                                       long long *out_sum)
+{
+    AverageRewardBucket *ordered_buckets;
+    long long total_sum = 0LL;
+    int remaining_students = student_count;
+    int bucket_index;
+
+    if (bucket_count <= 0) {
+        return student_count == 0;
+    }
+
+    ordered_buckets =
+        checked_malloc((size_t)bucket_count * sizeof(AverageRewardBucket));
+    memcpy(ordered_buckets,
+           buckets,
+           (size_t)bucket_count * sizeof(AverageRewardBucket));
+    qsort(ordered_buckets,
+          (size_t)bucket_count,
+          sizeof(AverageRewardBucket),
+          descending ?
+          average_reward_bucket_compare_descending :
+          average_reward_bucket_compare_ascending);
+
+    for (bucket_index = 0;
+         bucket_index < bucket_count && remaining_students > 0;
+         bucket_index++) {
+        int take_count = ordered_buckets[bucket_index].capacity <
+                         remaining_students ?
+                         ordered_buckets[bucket_index].capacity :
+                         remaining_students;
+        long long reward_sum;
+        long long new_total_sum;
+
+        if (take_count <= 0) {
+            continue;
+        }
+        if (!multiply_nonnegative_ll_fits(ordered_buckets[bucket_index].reward,
+                                          (long long)take_count,
+                                          LLONG_MAX,
+                                          &reward_sum) ||
+            !add_nonnegative_ll_fits(total_sum,
+                                     reward_sum,
+                                     LLONG_MAX,
+                                     &new_total_sum)) {
+            free(ordered_buckets);
+            return 0;
+        }
+        total_sum = new_total_sum;
+        remaining_students -= take_count;
+    }
+
+    free(ordered_buckets);
+    if (remaining_students > 0) {
+        return 0;
+    }
+    *out_sum = total_sum;
+    return 1;
+}
+
+static int ordinary_average_reward_difference_bound(
+    const ProblemData *problem_data,
+    const long long *lab_average_rewards,
+    long long *out_difference_bound)
+{
+    AverageRewardBucket *buckets =
+        checked_malloc((size_t)problem_data->lab_count *
+                       sizeof(AverageRewardBucket));
+    int bucket_count = 0;
+    int lab_index;
+    long long maximum_reward_sum;
+    long long minimum_reward_sum;
+
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        if (problem_data->labs[lab_index].capacity_value <= 0LL ||
+            problem_data->labs[lab_index].graph_capacity <= 0) {
+            continue;
+        }
+        buckets[bucket_count].reward = lab_average_rewards[lab_index];
+        buckets[bucket_count].capacity =
+            problem_data->labs[lab_index].graph_capacity;
+        bucket_count++;
+    }
+
+    if (!sum_extreme_average_rewards(buckets,
+                                     bucket_count,
+                                     problem_data->student_count,
+                                     1,
+                                     &maximum_reward_sum) ||
+        !sum_extreme_average_rewards(buckets,
+                                     bucket_count,
+                                     problem_data->student_count,
+                                     0,
+                                     &minimum_reward_sum) ||
+        maximum_reward_sum < minimum_reward_sum) {
+        free(buckets);
+        return 0;
+    }
+
+    *out_difference_bound = maximum_reward_sum - minimum_reward_sum;
+    free(buckets);
+    return 1;
+}
+
+static OrdinaryAverageFastPath ordinary_average_fast_path_create(
+    const ProblemData *problem_data,
+    const ExactAverageContext *context,
+    const RankCostModel *rank_cost_model,
+    int best_max_rank)
+{
+    OrdinaryAverageFastPath fast_path;
+    unsigned long long lcm_u64;
+    long long min_reward = LLONG_MAX;
+    long long max_reward = 0LL;
+    long long max_reward_difference;
+    long long third_multiplier;
+    long long max_third_unit = 0LL;
+    long long max_scaled_third_unit;
+    long long max_edge_third_abs;
+    long long per_unit_limit;
+    int lab_index;
+    int rank_value;
+    int active_rank_max = best_max_rank;
+    int maximum_rank = problem_data->lab_count + 1;
+
+    fast_path.available = 0;
+    fast_path.third_multiplier = 1LL;
+    fast_path.lab_average_rewards = NULL;
+
+    if (active_profile != NULL) {
+        active_profile->ordinary_average_scalar_attempts++;
+    }
+    if (context == NULL || context->positive_lab_count <= 0 ||
+        problem_data->student_count <= 0) {
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_not_applicable++;
+        }
+        return fast_path;
+    }
+    if (!big_uint_to_u64_checked(&context->common_denominator, &lcm_u64) ||
+        lcm_u64 > (unsigned long long)LLONG_MAX) {
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_lcm++;
+        }
+        return fast_path;
+    }
+
+    fast_path.lab_average_rewards =
+        checked_calloc((size_t)problem_data->lab_count, sizeof(long long));
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        long long capacity_value = problem_data->labs[lab_index].capacity_value;
+        long long reward_value;
+        if (capacity_value <= 0LL) {
+            continue;
+        }
+        if (lcm_u64 % (unsigned long long)capacity_value != 0ULL ||
+            lcm_u64 / (unsigned long long)capacity_value >
+                (unsigned long long)LLONG_MAX) {
+            ordinary_average_fast_path_free(&fast_path);
+            if (active_profile != NULL) {
+                active_profile->ordinary_average_scalar_fallback_lcm++;
+            }
+            return fast_path;
+        }
+        reward_value = (long long)(lcm_u64 / (unsigned long long)capacity_value);
+        fast_path.lab_average_rewards[lab_index] = reward_value;
+        if (reward_value < min_reward) {
+            min_reward = reward_value;
+        }
+        if (reward_value > max_reward) {
+            max_reward = reward_value;
+        }
+    }
+    if (min_reward == LLONG_MAX) {
+        ordinary_average_fast_path_free(&fast_path);
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_not_applicable++;
+        }
+        return fast_path;
+    }
+
+    if (!ordinary_average_reward_difference_bound(problem_data,
+                                                  fast_path.lab_average_rewards,
+                                                  &max_reward_difference)) {
+        ordinary_average_fast_path_free(&fast_path);
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_overflow++;
+        }
+        return fast_path;
+    }
+    third_multiplier = max_reward_difference + 1LL;
+    per_unit_limit = INF_COST / (long long)problem_data->student_count / 8LL;
+    if (third_multiplier <= 0LL || per_unit_limit <= 0LL) {
+        ordinary_average_fast_path_free(&fast_path);
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_overflow++;
+        }
+        return fast_path;
+    }
+
+    if (active_rank_max > maximum_rank) {
+        active_rank_max = maximum_rank;
+    }
+    if (active_rank_max < 1) {
+        active_rank_max = 1;
+    }
+
+    for (rank_value = 1; rank_value <= active_rank_max; rank_value++) {
+        long long unit_value;
+        if (rank_cost_model == NULL) {
+            unit_value = checked_multiply_rank_cost((long long)rank_value,
+                                                    (long long)rank_value,
+                                                    "ordinary average-fill scalar fast path");
+        } else {
+            long long dissatisfaction =
+                dissatisfaction_cost_for_rank(problem_data, rank_cost_model, rank_value);
+            unit_value = checked_multiply_rank_cost(
+                dissatisfaction,
+                dissatisfaction,
+                "ordinary average-fill scalar fast path");
+        }
+        if (unit_value > max_third_unit) {
+            max_third_unit = unit_value;
+        }
+    }
+
+    if (!multiply_nonnegative_ll_fits(max_third_unit,
+                                      third_multiplier,
+                                      per_unit_limit,
+                                      &max_scaled_third_unit) ||
+        !add_nonnegative_ll_fits(max_scaled_third_unit,
+                                 max_reward,
+                                 per_unit_limit,
+                                 &max_edge_third_abs)) {
+        ordinary_average_fast_path_free(&fast_path);
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_overflow++;
+        }
+        return fast_path;
+    }
+
+    fast_path.available = 1;
+    fast_path.third_multiplier = third_multiplier;
+    if (active_profile != NULL) {
+        active_profile->ordinary_average_scalar_used++;
+    }
+    return fast_path;
+}
+
+static Cost canonical_rank_first_cost_for_solution(
+    const ProblemData *problem_data,
+    const int *assignment,
+    const int *lab_counts,
+    const int *minimum_lab_counts,
+    const RankCostModel *rank_cost_model)
+{
+    Cost total = cost_zero();
+    int lab_index;
+    int student_index;
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        int filled_required_slots = lab_counts[lab_index];
+        if (filled_required_slots > minimum_lab_counts[lab_index]) {
+            filled_required_slots = minimum_lab_counts[lab_index];
+        }
+        if (filled_required_slots > 0) {
+            total.first =
+                checked_cost_component_subtract(total.first,
+                                                (long long)filled_required_slots,
+                                                "canonical solution cost");
+        }
+    }
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        Cost student_cost =
+            assignment_rank_cost(problem_data,
+                                 student_index,
+                                 assignment[student_index],
+                                 rank_cost_model,
+                                 NULL);
+        total.second =
+            checked_cost_component_add(total.second,
+                                       student_cost.second,
+                                       "canonical solution cost");
+        total.third =
+            checked_cost_component_add(total.third,
+                                      student_cost.third,
+                                      "canonical solution cost");
+    }
+    return total;
 }
 
 static ConvexFillContext convex_fill_context_create(const ProblemData *problem_data)
@@ -5078,6 +5453,7 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
     const WeightedObjective *weighted_objective,
     const long long *lab_average_rewards,
     const ConvexFillContext *convex_fill_context,
+    const OrdinaryAverageFastPath *ordinary_average_fast_path,
     int fail_on_infeasible)
 {
     int source_node = 0;
@@ -5098,6 +5474,29 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
         checked_calloc((size_t)problem_data->lab_count, sizeof(int));
     int total_assignment_arcs = 0;
     int sink_reverse_edges = 0;
+    int use_ordinary_average_scalar =
+        optimize_fill_average &&
+        ordinary_average_fast_path != NULL &&
+        ordinary_average_fast_path->available;
+    int add_exact_average_coefficients =
+        exact_average_context != NULL &&
+        optimize_fill_average &&
+        !use_ordinary_average_scalar;
+    long long ordinary_third_multiplier =
+        use_ordinary_average_scalar ?
+        ordinary_average_fast_path->third_multiplier :
+        1LL;
+    const long long *active_lab_average_rewards = lab_average_rewards;
+    AverageRewardPlacement reward_placement =
+        lab_average_rewards == NULL ?
+        AVERAGE_REWARD_NONE :
+        AVERAGE_REWARD_SECOND;
+
+    if (use_ordinary_average_scalar) {
+        active_lab_average_rewards =
+            ordinary_average_fast_path->lab_average_rewards;
+        reward_placement = AVERAGE_REWARD_THIRD;
+    }
 
     solution.assignment = checked_malloc((size_t)problem_data->student_count * sizeof(int));
     solution.lab_counts = checked_calloc((size_t)problem_data->lab_count, sizeof(int));
@@ -5175,11 +5574,13 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
                                               student_node,
                                               lab_node,
                                               1,
-                                              assignment_rank_cost(problem_data,
-                                                                   student_index,
-                                                                   lab_index,
-                                                                   rank_cost_model,
-                                                                   weighted_objective));
+                                              assignment_rank_cost_scaled(
+                                                  problem_data,
+                                                  student_index,
+                                                  lab_index,
+                                                  rank_cost_model,
+                                                  weighted_objective,
+                                                  ordinary_third_multiplier));
                 AssignmentArc arc;
                 arc.student_index = student_index;
                 arc.lab_index = lab_index;
@@ -5226,15 +5627,16 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
             continue;
         }
         if (required_slots > 0) {
-            if (exact_average_context != NULL && optimize_fill_average) {
+            if (add_exact_average_coefficients) {
                 mcf_add_edge_with_fill(&graph,
                                        lab_node,
                                        sink_node,
                                        required_slots,
-                                       lab_sink_cost_with_average_reward(
+                                       lab_sink_cost_with_reward(
                                            -1LL,
                                            lab_index,
-                                           lab_average_rewards),
+                                           active_lab_average_rewards,
+                                           reward_placement),
                                        exact_average_context->term_by_lab[lab_index],
                                        -1);
             } else {
@@ -5242,22 +5644,24 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
                              lab_node,
                              sink_node,
                              required_slots,
-                             lab_sink_cost_with_average_reward(-1LL,
-                                                               lab_index,
-                                                               lab_average_rewards));
+                             lab_sink_cost_with_reward(-1LL,
+                                                       lab_index,
+                                                       active_lab_average_rewards,
+                                                       reward_placement));
             }
         }
         optional_slots = graph_capacity - required_slots;
         if (optional_slots > 0) {
-            if (exact_average_context != NULL && optimize_fill_average) {
+            if (add_exact_average_coefficients) {
                 mcf_add_edge_with_fill(&graph,
                                        lab_node,
                                        sink_node,
                                        optional_slots,
-                                       lab_sink_cost_with_average_reward(
+                                       lab_sink_cost_with_reward(
                                            0LL,
                                            lab_index,
-                                           lab_average_rewards),
+                                           active_lab_average_rewards,
+                                           reward_placement),
                                        exact_average_context->term_by_lab[lab_index],
                                        -1);
             } else {
@@ -5265,14 +5669,15 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
                              lab_node,
                              sink_node,
                              optional_slots,
-                             lab_sink_cost_with_average_reward(0LL,
-                                                               lab_index,
-                                                               lab_average_rewards));
+                             lab_sink_cost_with_reward(0LL,
+                                                       lab_index,
+                                                       active_lab_average_rewards,
+                                                       reward_placement));
             }
         }
     }
 
-    if (exact_average_context != NULL && optimize_fill_average) {
+    if (add_exact_average_coefficients) {
         result = min_cost_flow_exact_average(&graph,
                                              source_node,
                                              sink_node,
@@ -5342,6 +5747,15 @@ static SolutionResult solve_with_minimum_counts_ungrouped(
         }
     }
 
+    if (use_ordinary_average_scalar) {
+        solution.total_cost =
+            canonical_rank_first_cost_for_solution(problem_data,
+                                                   solution.assignment,
+                                                   solution.lab_counts,
+                                                   minimum_lab_counts,
+                                                   rank_cost_model);
+    }
+
     free(arcs.items);
     mcf_graph_free(&graph);
     return solution;
@@ -5358,6 +5772,7 @@ static SolutionResult solve_with_minimum_counts_grouped(
     const WeightedObjective *weighted_objective,
     const long long *lab_average_rewards,
     const ConvexFillContext *convex_fill_context,
+    const OrdinaryAverageFastPath *ordinary_average_fast_path,
     const StudentGroups *groups,
     int fail_on_infeasible)
 {
@@ -5380,6 +5795,29 @@ static SolutionResult solve_with_minimum_counts_grouped(
     int *member_cursor = checked_malloc((size_t)groups->count * sizeof(int));
     int total_assignment_arcs = 0;
     int sink_reverse_edges = 0;
+    int use_ordinary_average_scalar =
+        optimize_fill_average &&
+        ordinary_average_fast_path != NULL &&
+        ordinary_average_fast_path->available;
+    int add_exact_average_coefficients =
+        exact_average_context != NULL &&
+        optimize_fill_average &&
+        !use_ordinary_average_scalar;
+    long long ordinary_third_multiplier =
+        use_ordinary_average_scalar ?
+        ordinary_average_fast_path->third_multiplier :
+        1LL;
+    const long long *active_lab_average_rewards = lab_average_rewards;
+    AverageRewardPlacement reward_placement =
+        lab_average_rewards == NULL ?
+        AVERAGE_REWARD_NONE :
+        AVERAGE_REWARD_SECOND;
+
+    if (use_ordinary_average_scalar) {
+        active_lab_average_rewards =
+            ordinary_average_fast_path->lab_average_rewards;
+        reward_placement = AVERAGE_REWARD_THIRD;
+    }
 
     solution.assignment =
         checked_malloc((size_t)problem_data->student_count * sizeof(int));
@@ -5473,11 +5911,13 @@ static SolutionResult solve_with_minimum_counts_grouped(
                                               group_node,
                                               lab_node,
                                               groups->items[group_index].size,
-                                              assignment_rank_cost(problem_data,
-                                                                   representative_student,
-                                                                   lab_index,
-                                                                   rank_cost_model,
-                                                                   weighted_objective));
+                                              assignment_rank_cost_scaled(
+                                                  problem_data,
+                                                  representative_student,
+                                                  lab_index,
+                                                  rank_cost_model,
+                                                  weighted_objective,
+                                                  ordinary_third_multiplier));
                 GroupAssignmentArc arc;
                 arc.group_index = group_index;
                 arc.lab_index = lab_index;
@@ -5525,15 +5965,16 @@ static SolutionResult solve_with_minimum_counts_grouped(
             continue;
         }
         if (required_slots > 0) {
-            if (exact_average_context != NULL && optimize_fill_average) {
+            if (add_exact_average_coefficients) {
                 mcf_add_edge_with_fill(&graph,
                                        lab_node,
                                        sink_node,
                                        required_slots,
-                                       lab_sink_cost_with_average_reward(
+                                       lab_sink_cost_with_reward(
                                            -1LL,
                                            lab_index,
-                                           lab_average_rewards),
+                                           active_lab_average_rewards,
+                                           reward_placement),
                                        exact_average_context->term_by_lab[lab_index],
                                        -1);
             } else {
@@ -5541,22 +5982,24 @@ static SolutionResult solve_with_minimum_counts_grouped(
                              lab_node,
                              sink_node,
                              required_slots,
-                             lab_sink_cost_with_average_reward(-1LL,
-                                                               lab_index,
-                                                               lab_average_rewards));
+                             lab_sink_cost_with_reward(-1LL,
+                                                       lab_index,
+                                                       active_lab_average_rewards,
+                                                       reward_placement));
             }
         }
         optional_slots = graph_capacity - required_slots;
         if (optional_slots > 0) {
-            if (exact_average_context != NULL && optimize_fill_average) {
+            if (add_exact_average_coefficients) {
                 mcf_add_edge_with_fill(&graph,
                                        lab_node,
                                        sink_node,
                                        optional_slots,
-                                       lab_sink_cost_with_average_reward(
+                                       lab_sink_cost_with_reward(
                                            0LL,
                                            lab_index,
-                                           lab_average_rewards),
+                                           active_lab_average_rewards,
+                                           reward_placement),
                                        exact_average_context->term_by_lab[lab_index],
                                        -1);
             } else {
@@ -5564,14 +6007,15 @@ static SolutionResult solve_with_minimum_counts_grouped(
                              lab_node,
                              sink_node,
                              optional_slots,
-                             lab_sink_cost_with_average_reward(0LL,
-                                                               lab_index,
-                                                               lab_average_rewards));
+                             lab_sink_cost_with_reward(0LL,
+                                                       lab_index,
+                                                       active_lab_average_rewards,
+                                                       reward_placement));
             }
         }
     }
 
-    if (exact_average_context != NULL && optimize_fill_average) {
+    if (add_exact_average_coefficients) {
         result = min_cost_flow_exact_average(&graph,
                                              source_node,
                                              sink_node,
@@ -5666,6 +6110,15 @@ static SolutionResult solve_with_minimum_counts_grouped(
         }
     }
 
+    if (use_ordinary_average_scalar) {
+        solution.total_cost =
+            canonical_rank_first_cost_for_solution(problem_data,
+                                                   solution.assignment,
+                                                   solution.lab_counts,
+                                                   minimum_lab_counts,
+                                                   rank_cost_model);
+    }
+
     free(arcs.items);
     free(member_cursor);
     mcf_graph_free(&graph);
@@ -5685,9 +6138,45 @@ static SolutionResult solve_with_minimum_counts(
     const ConvexFillContext *convex_fill_context,
     const StudentGroups *student_groups)
 {
+    OrdinaryAverageFastPath ordinary_average_fast_path;
+    const OrdinaryAverageFastPath *ordinary_average_fast_path_pointer = NULL;
+    SolutionResult result;
+
+    ordinary_average_fast_path.available = 0;
+    ordinary_average_fast_path.third_multiplier = 1LL;
+    ordinary_average_fast_path.lab_average_rewards = NULL;
+
+    if (optimize_fill_average &&
+        exact_average_context != NULL &&
+        weighted_objective == NULL &&
+        lab_average_rewards == NULL &&
+        convex_fill_context == NULL) {
+        ordinary_average_fast_path =
+            ordinary_average_fast_path_create(problem_data,
+                                              exact_average_context,
+                                              rank_cost_model,
+                                              best_max_rank);
+        if (ordinary_average_fast_path.available) {
+            ordinary_average_fast_path_pointer = &ordinary_average_fast_path;
+        }
+    }
+
     if (student_groups == NULL ||
         student_groups->count == problem_data->student_count) {
-        return solve_with_minimum_counts_ungrouped(problem_data,
+        result = solve_with_minimum_counts_ungrouped(problem_data,
+                                                     best_max_rank,
+                                                     minimum_lab_counts,
+                                                     optimize_fill_average,
+                                                     enforce_minimum_counts,
+                                                     exact_average_context,
+                                                     rank_cost_model,
+                                                     weighted_objective,
+                                                     lab_average_rewards,
+                                                     convex_fill_context,
+                                                     ordinary_average_fast_path_pointer,
+                                                     1);
+    } else {
+        result = solve_with_minimum_counts_grouped(problem_data,
                                                    best_max_rank,
                                                    minimum_lab_counts,
                                                    optimize_fill_average,
@@ -5697,21 +6186,13 @@ static SolutionResult solve_with_minimum_counts(
                                                    weighted_objective,
                                                    lab_average_rewards,
                                                    convex_fill_context,
+                                                   ordinary_average_fast_path_pointer,
+                                                   student_groups,
                                                    1);
     }
 
-    return solve_with_minimum_counts_grouped(problem_data,
-                                             best_max_rank,
-                                             minimum_lab_counts,
-                                             optimize_fill_average,
-                                             enforce_minimum_counts,
-                                             exact_average_context,
-                                             rank_cost_model,
-                                             weighted_objective,
-                                             lab_average_rewards,
-                                             convex_fill_context,
-                                             student_groups,
-                                             1);
+    ordinary_average_fast_path_free(&ordinary_average_fast_path);
+    return result;
 }
 
 static OptionalSolutionResult try_solve_with_minimum_counts(
@@ -5728,6 +6209,28 @@ static OptionalSolutionResult try_solve_with_minimum_counts(
     const StudentGroups *student_groups)
 {
     OptionalSolutionResult result;
+    OrdinaryAverageFastPath ordinary_average_fast_path;
+    const OrdinaryAverageFastPath *ordinary_average_fast_path_pointer = NULL;
+
+    ordinary_average_fast_path.available = 0;
+    ordinary_average_fast_path.third_multiplier = 1LL;
+    ordinary_average_fast_path.lab_average_rewards = NULL;
+
+    if (optimize_fill_average &&
+        exact_average_context != NULL &&
+        weighted_objective == NULL &&
+        lab_average_rewards == NULL &&
+        convex_fill_context == NULL) {
+        ordinary_average_fast_path =
+            ordinary_average_fast_path_create(problem_data,
+                                              exact_average_context,
+                                              rank_cost_model,
+                                              best_max_rank);
+        if (ordinary_average_fast_path.available) {
+            ordinary_average_fast_path_pointer = &ordinary_average_fast_path;
+        }
+    }
+
     result.feasible = 0;
     if (student_groups == NULL ||
         student_groups->count == problem_data->student_count) {
@@ -5742,6 +6245,7 @@ static OptionalSolutionResult try_solve_with_minimum_counts(
                                                 weighted_objective,
                                                 lab_average_rewards,
                                                 convex_fill_context,
+                                                ordinary_average_fast_path_pointer,
                                                 0);
     } else {
         result.solution =
@@ -5755,10 +6259,12 @@ static OptionalSolutionResult try_solve_with_minimum_counts(
                                              weighted_objective,
                                              lab_average_rewards,
                                              convex_fill_context,
+                                             ordinary_average_fast_path_pointer,
                                              student_groups,
                                              0);
     }
     result.feasible = result.solution.assignment != NULL;
+    ordinary_average_fast_path_free(&ordinary_average_fast_path);
     return result;
 }
 
@@ -10913,6 +11419,22 @@ static void solver_profile_add_child_profile(SolverProfile *profile,
         read_profile_long_long_or_zero(profile_path, "exact_path_cost_comparisons");
     profile->biguint_score_comparisons +=
         read_profile_long_long_or_zero(profile_path, "biguint_score_comparisons");
+    profile->ordinary_average_scalar_attempts +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "ordinary_average_scalar_attempts");
+    profile->ordinary_average_scalar_used +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "ordinary_average_scalar_used");
+    profile->ordinary_average_scalar_fallback_lcm +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "ordinary_average_scalar_fallback_lcm");
+    profile->ordinary_average_scalar_fallback_overflow +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "ordinary_average_scalar_fallback_overflow");
+    profile->ordinary_average_scalar_fallback_not_applicable +=
+        read_profile_long_long_or_zero(
+            profile_path,
+            "ordinary_average_scalar_fallback_not_applicable");
     profile->weighted_bound_prunes +=
         read_profile_long_long_or_zero(profile_path, "weighted_bound_prunes");
     profile->weighted_corner_cache_hits +=
@@ -11260,6 +11782,21 @@ static void solver_profile_write(const char *profile_path,
         fprintf(profile_file,
                 "biguint_score_comparisons\t%lld\n",
                 profile->biguint_score_comparisons) < 0 ||
+        fprintf(profile_file,
+                "ordinary_average_scalar_attempts\t%lld\n",
+                profile->ordinary_average_scalar_attempts) < 0 ||
+        fprintf(profile_file,
+                "ordinary_average_scalar_used\t%lld\n",
+                profile->ordinary_average_scalar_used) < 0 ||
+        fprintf(profile_file,
+                "ordinary_average_scalar_fallback_lcm\t%lld\n",
+                profile->ordinary_average_scalar_fallback_lcm) < 0 ||
+        fprintf(profile_file,
+                "ordinary_average_scalar_fallback_overflow\t%lld\n",
+                profile->ordinary_average_scalar_fallback_overflow) < 0 ||
+        fprintf(profile_file,
+                "ordinary_average_scalar_fallback_not_applicable\t%lld\n",
+                profile->ordinary_average_scalar_fallback_not_applicable) < 0 ||
         fprintf(profile_file,
                 "weighted_bound_prunes\t%lld\n",
                 profile->weighted_bound_prunes) < 0 ||

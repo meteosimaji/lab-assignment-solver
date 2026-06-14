@@ -268,7 +268,8 @@ This also creates:
   the previous assignment with the adjusted assignment.
 - `out.txt.profile.tsv`: only when `--profile` is used; solver call counters,
   exact path-cost comparison counts, BigUInt comparison counts, candidate
-  counts, and phase CPU timings.
+  counts, ordinary average-fill scalar fast-path counters, and phase CPU
+  timings.
 
 Report columns are intentionally machine-readable.  The most important fields
 are:
@@ -289,6 +290,7 @@ are:
   and `margin`.
 - `profile.tsv`: graph/flow call counters, threshold candidate counts,
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
+  `ordinary_average_scalar_used`,
   branch-and-bound counters, and phase CPU timings.  The legacy
   `weighted_score_comparisons` key is still written as an alias for
   `exact_path_cost_comparisons`.
@@ -715,6 +717,18 @@ the final average-fill tie-break, the program converts
 `sum assigned_count / capacity` to an equivalent least-common-denominator
 integer comparison with an internal unsigned big-integer type, so it does not
 rely on floating point or scaled approximations.
+
+When the least-common-denominator coefficients and the required big-M
+lexicographic multiplier fit safely in signed integer costs, ordinary
+rank-first objectives use a scalar fast path for that same average-fill
+tie-break.  The solver minimizes `rank_square * M - U_scaled`, where
+`U_scaled` is the exact LCD-scaled fill reward and `M` is larger than any
+possible fill-reward difference.  This preserves the `(rank_square, -Uavg)`
+order exactly.  The safety check only considers rank costs for edges that are
+active under the current max-rank threshold, and it bounds the possible
+`U_scaled` difference by sorting capacity-limited fill-reward slots.  If any
+overflow or bound check fails, the solver falls back to the BigUInt
+exact-average path.
 
 In the fair-mode path, when all active students have the same rank table after
 the worst-rank threshold is fixed, the solver switches to an exact count-based

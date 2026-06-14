@@ -160,6 +160,13 @@ feasible set or objective value.
   rank-first modes remain exact but use the general grouped min-cost-flow path.
 - Capacity-bucket average-fill comparison: equal denominators are combined
   exactly.
+- Ordinary average-fill scalar fast path: when all bounds fit in signed integer
+  costs, the final `(T, -U_scaled)` tie-break is represented as
+  `T*M - U_scaled`, with `M` larger than any possible `U_scaled` difference.
+  The bound only uses ranks whose edges are present under the current
+  max-rank threshold, and the fill-reward range is bounded by the top and
+  bottom `N` capacity-limited reward slots.  If the safety checks fail, the
+  BigUInt exact-average comparison is used unchanged.
 - Relaxed-corner cache: repeated weighted-exact corners are solved once.
 - Portfolio process parallelism: independent exact objective candidates run in
   parallel and are reduced deterministically.

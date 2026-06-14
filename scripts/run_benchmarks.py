@@ -142,6 +142,9 @@ FIELDNAMES = [
     "corner_misses",
     "exact_path_cost_comparisons",
     "biguint_score_comparisons",
+    "ordinary_average_scalar_used",
+    "ordinary_average_scalar_fallback_lcm",
+    "ordinary_average_scalar_fallback_overflow",
 ]
 
 
@@ -302,6 +305,13 @@ def run_case_once(case, repeat_index, binary, bench_dir):
         "corner_misses": profile.get("weighted_corner_cache_misses", ""),
         "exact_path_cost_comparisons": profile.get("exact_path_cost_comparisons", ""),
         "biguint_score_comparisons": profile.get("biguint_score_comparisons", ""),
+        "ordinary_average_scalar_used": profile.get("ordinary_average_scalar_used", ""),
+        "ordinary_average_scalar_fallback_lcm": profile.get(
+            "ordinary_average_scalar_fallback_lcm", ""
+        ),
+        "ordinary_average_scalar_fallback_overflow": profile.get(
+            "ordinary_average_scalar_fallback_overflow", ""
+        ),
     }
 
 

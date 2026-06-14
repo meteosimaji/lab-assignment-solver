@@ -36,6 +36,16 @@ safety conditions are not met.
 - Average-rank and rank-sum hard targets are rejected with positive
   `--change-penalty`.  In that mode the rank-first cost component contains the
   change term, so comparing it with a pure rank-sum bound would be incorrect.
+- Ordinary rank-first average-fill tie-breaks use an integer scalar fast path
+  when the capacity LCM, big-M multiplier, and per-edge cost bounds fit safely
+  in signed `long long`.  It rewrites the final `(rank_square, -Uavg)` order as
+  `rank_square * M - U_scaled`, then canonicalizes the returned solution cost
+  back to the unscaled rank tuple.  If any safety check fails, the existing
+  BigUInt exact-average path is used unchanged.  The safety bound only uses
+  rank costs for ranks active under the current max-rank threshold, and its
+  big-M reward range is computed from the largest and smallest feasible
+  capacity-limited fill-reward slot sums rather than from the coarser
+  `student_count * (max_reward - min_reward)` bound.
 - Weighted-exact branch-and-bound splits boxes by weighted objective spread
   (`max_rank` spread versus `minimum_fill` spread) before falling back to index
   width.  This changes only search order, not the lower-bound proof.
@@ -45,9 +55,6 @@ safety conditions are not met.
 
 ## Safe Fast Paths To Consider
 
-- Use integer scalarization for exact average-fill tie-breaks when the LCM,
-  path-comparison coefficient bounds, and lexicographic bounds fit in a checked
-  scalar representation.
 - Cache exact average scores for coefficient vectors to reduce repeated BigUInt
   accumulation.
 - Add scalar shortest-path queues only after overflow-checked scalarization
