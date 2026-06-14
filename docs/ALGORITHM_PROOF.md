@@ -174,6 +174,16 @@ feasible set or objective value.
   weighted-exact search range, the scalar safety check only needs rank costs
   up to that active upper bound.  Edges with larger rank cannot be present in
   any weighted corner solve.
+- Average-fill hard targets: the global average-fill target is accepted only
+  when it is already implied by per-laboratory lower bounds or when average
+  fill is constant over all complete assignments.  In both cases the target
+  cannot change the selected objective's feasible search order; otherwise the
+  run is rejected instead of treated heuristically.
+- Layered initial potentials: fresh assignment min-cost-flow graphs have only
+  forward residual capacity on source-to-student/group, student/group-to-lab,
+  and lab-to-sink edges.  A single topological relaxation gives the same
+  initial potentials as the general queue method; if any positive residual edge
+  violates the layer order, the solver falls back.
 - Portfolio process parallelism: independent exact objective candidates run in
   parallel and are reduced deterministically.
 

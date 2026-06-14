@@ -188,6 +188,8 @@ typedef struct {
 struct TargetConstraints {
     int has_average_rank_max;
     RatioValue average_rank_max;
+    int has_average_fill_min;
+    RatioValue average_fill_min;
     int has_rank_sum_max;
     long long rank_sum_max;
     int has_rank_square_max;
@@ -353,6 +355,7 @@ typedef struct {
     long long minimum_candidates_tested;
     long long exact_path_cost_comparisons;
     long long biguint_score_comparisons;
+    long long layered_initial_potentials_used;
     long long ordinary_average_scalar_attempts;
     long long ordinary_average_scalar_used;
     long long ordinary_average_scalar_fallback_lcm;
@@ -1590,7 +1593,7 @@ static void print_help(const char *program_name)
     printf("  --require-rank-square-at-most N   reserved; parsed but not yet exact\n");
     printf("  --require-max-rank-at-most K      require max assigned rank <= K\n");
     printf("  --require-minimum-fill-at-least X require minimum fill rate >= X or percent\n");
-    printf("  --require-average-fill-at-least X reserved; global resource target not yet exact\n");
+    printf("  --require-average-fill-at-least X require exact average fill >= X when safely supported\n");
     printf("  --require-no-outside             require no outside-preference assignment\n");
     printf("  --require-outside-at-most N       require outside-preference count <= N (exactly supports 0)\n");
     printf("  --first-choice-gap N     satisfaction cost for rank 2, default 100\n");
@@ -2022,6 +2025,7 @@ static void target_constraints_init(TargetConstraints *targets)
 {
     memset(targets, 0, sizeof(*targets));
     targets->average_rank_max.denominator = 1LL;
+    targets->average_fill_min.denominator = 1LL;
     targets->minimum_fill_min.denominator = 1LL;
 }
 
@@ -2031,6 +2035,7 @@ static int target_constraints_are_empty(const TargetConstraints *targets)
         return 1;
     }
     return !targets->has_average_rank_max &&
+           !targets->has_average_fill_min &&
            !targets->has_rank_sum_max &&
            !targets->has_rank_square_max &&
            !targets->has_max_rank_max &&
@@ -2058,6 +2063,17 @@ static void target_constraints_set_minimum_fill_min(TargetConstraints *targets,
     }
     targets->has_minimum_fill_min = 1;
     targets->minimum_fill_min = ratio_value_reduce(bound);
+}
+
+static void target_constraints_set_average_fill_min(TargetConstraints *targets,
+                                                    RatioValue bound)
+{
+    if (targets->has_average_fill_min &&
+        ratio_compare_value(bound, targets->average_fill_min) < 0) {
+        return;
+    }
+    targets->has_average_fill_min = 1;
+    targets->average_fill_min = ratio_value_reduce(bound);
 }
 
 static void target_constraints_set_rank_sum_max(TargetConstraints *targets,
@@ -4217,6 +4233,52 @@ static void heap_free(MinHeap *heap)
     free(heap->positions);
 }
 
+static int compute_initial_potentials_layered(const McfGraph *graph,
+                                              int source_node,
+                                              Cost *potential)
+{
+    int node_index;
+    Cost infinite_cost = cost_infinity();
+
+    for (node_index = 0; node_index < graph->node_count; node_index++) {
+        potential[node_index] = infinite_cost;
+    }
+    potential[source_node] = cost_zero();
+
+    for (node_index = 0; node_index < graph->node_count; node_index++) {
+        int edge_index;
+        if (cost_equal(potential[node_index], infinite_cost)) {
+            continue;
+        }
+        for (edge_index = 0;
+             edge_index < graph->adjacency[node_index].size;
+             edge_index++) {
+            const McfEdge *edge = &graph->adjacency[node_index].items[edge_index];
+            Cost next_distance;
+            if (edge->capacity <= 0) {
+                continue;
+            }
+            if (edge->to_node <= node_index) {
+                return 0;
+            }
+            next_distance = cost_add(potential[node_index], edge->cost);
+            if (cost_less(next_distance, potential[edge->to_node])) {
+                potential[edge->to_node] = next_distance;
+            }
+        }
+    }
+
+    for (node_index = 0; node_index < graph->node_count; node_index++) {
+        if (cost_equal(potential[node_index], infinite_cost)) {
+            potential[node_index] = cost_zero();
+        }
+    }
+    if (active_profile != NULL) {
+        active_profile->layered_initial_potentials_used++;
+    }
+    return 1;
+}
+
 static void exact_heap_init(ExactMinHeap *heap,
                             int node_count,
                             const ExactPathCost *distances,
@@ -4354,6 +4416,10 @@ static void compute_initial_potentials(const McfGraph *graph,
                                        int source_node,
                                        Cost *potential)
 {
+    if (compute_initial_potentials_layered(graph, source_node, potential)) {
+        return;
+    }
+
     int queue_capacity = graph->node_count + 1;
     int *queue = checked_malloc((size_t)queue_capacity * sizeof(int));
     int *in_queue = checked_calloc((size_t)graph->node_count, sizeof(int));
@@ -4523,6 +4589,92 @@ static void compute_initial_exact_potentials(const McfGraph *graph,
                                              int *potential_coefficients,
                                              const ExactAverageContext *context)
 {
+    int layered_node_index;
+    ExactPathCost layered_infinite_cost = exact_path_cost_infinity();
+    int *layered_candidate_coefficients =
+        checked_calloc((size_t)context->term_count, sizeof(int));
+    int layered_ok = 1;
+
+    for (layered_node_index = 0;
+         layered_node_index < graph->node_count;
+         layered_node_index++) {
+        potential[layered_node_index] = layered_infinite_cost;
+        memset(coefficient_row(potential_coefficients,
+                               context->term_count,
+                               layered_node_index),
+               0,
+               (size_t)context->term_count * sizeof(int));
+    }
+    potential[source_node] = exact_path_cost_zero();
+
+    for (layered_node_index = 0;
+         layered_ok && layered_node_index < graph->node_count;
+         layered_node_index++) {
+        int edge_index;
+        if (exact_path_cost_is_infinity(potential[layered_node_index])) {
+            continue;
+        }
+        for (edge_index = 0;
+             edge_index < graph->adjacency[layered_node_index].size;
+             edge_index++) {
+            const McfEdge *edge =
+                &graph->adjacency[layered_node_index].items[edge_index];
+            ExactPathCost next_distance;
+            if (edge->capacity <= 0) {
+                continue;
+            }
+            if (edge->to_node <= layered_node_index) {
+                layered_ok = 0;
+                break;
+            }
+            next_distance =
+                exact_path_cost_add(potential[layered_node_index],
+                                    exact_path_cost_from_edge(edge));
+            build_edge_adjusted_coefficients(
+                layered_candidate_coefficients,
+                const_coefficient_row(potential_coefficients,
+                                      context->term_count,
+                                      layered_node_index),
+                edge,
+                context->term_count);
+            if (exact_path_cost_less(
+                    context,
+                    &next_distance,
+                    layered_candidate_coefficients,
+                    &potential[edge->to_node],
+                    const_coefficient_row(potential_coefficients,
+                                          context->term_count,
+                                          edge->to_node))) {
+                potential[edge->to_node] = next_distance;
+                copy_coefficients(coefficient_row(potential_coefficients,
+                                                  context->term_count,
+                                                  edge->to_node),
+                                  layered_candidate_coefficients,
+                                  context->term_count);
+            }
+        }
+    }
+    if (layered_ok) {
+        for (layered_node_index = 0;
+             layered_node_index < graph->node_count;
+             layered_node_index++) {
+            if (exact_path_cost_is_infinity(potential[layered_node_index])) {
+                potential[layered_node_index] = exact_path_cost_zero();
+                memset(coefficient_row(potential_coefficients,
+                                       context->term_count,
+                                       layered_node_index),
+                       0,
+                       (size_t)context->term_count * sizeof(int));
+            }
+        }
+        free(layered_candidate_coefficients);
+        if (active_profile != NULL) {
+            active_profile->layered_initial_potentials_used++;
+        }
+        return;
+    }
+    free(layered_candidate_coefficients);
+
     int queue_capacity = graph->node_count + 1;
     int *queue = checked_malloc((size_t)queue_capacity * sizeof(int));
     int *in_queue = checked_calloc((size_t)graph->node_count, sizeof(int));
@@ -6701,6 +6853,170 @@ static int rank_sum_satisfies_targets(const ProblemData *problem_data,
     return rank_sum <= rank_sum_limit;
 }
 
+static unsigned long long nonnegative_ll_to_u64(long long value,
+                                                const char *context)
+{
+    if (value < 0LL) {
+        fail_with_context(context, "negative integer in unsigned conversion");
+    }
+    return (unsigned long long)value;
+}
+
+static int average_fill_counts_satisfy_bound(
+    const ProblemData *problem_data,
+    const int *lab_counts,
+    RatioValue bound)
+{
+    ExactAverageContext context = exact_average_context_create(problem_data);
+    BigUInt left_scaled_sum;
+    BigUInt right_scaled_bound;
+    int term_index;
+    int lab_index;
+    int *coefficients =
+        checked_calloc((size_t)context.term_count, sizeof(int));
+    unsigned long long target_scale;
+    int satisfied;
+
+    if (context.positive_lab_count <= 0) {
+        exact_average_context_free(&context);
+        free(coefficients);
+        return 1;
+    }
+
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        int term = context.term_by_lab[lab_index];
+        if (term >= 0) {
+            coefficients[term] += lab_counts[lab_index];
+        }
+    }
+
+    big_uint_zero(&left_scaled_sum);
+    for (term_index = 0; term_index < context.term_count; term_index++) {
+        unsigned long long coefficient =
+            (unsigned long long)coefficients[term_index];
+        unsigned long long denominator =
+            nonnegative_ll_to_u64(bound.denominator,
+                                  "average-fill target");
+        unsigned long long scale =
+            checked_multiply_u64(coefficient,
+                                 denominator,
+                                 "average-fill target");
+        big_uint_add_scaled_u64(&left_scaled_sum,
+                                &context.fill_weights[term_index],
+                                scale);
+    }
+
+    right_scaled_bound = context.common_denominator;
+    target_scale =
+        checked_multiply_u64(nonnegative_ll_to_u64(bound.numerator,
+                                                   "average-fill target"),
+                             (unsigned long long)context.positive_lab_count,
+                             "average-fill target");
+    big_uint_multiply_u64(&right_scaled_bound, target_scale);
+
+    satisfied = big_uint_compare(&left_scaled_sum, &right_scaled_bound) >= 0;
+    exact_average_context_free(&context);
+    free(coefficients);
+    return satisfied;
+}
+
+static int build_any_complete_lab_counts(const ProblemData *problem_data,
+                                         int *lab_counts)
+{
+    int lab_index;
+    int remaining_students = problem_data->student_count;
+
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        lab_counts[lab_index] = 0;
+    }
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        if (problem_data->labs[lab_index].capacity_value > 0LL) {
+            if (problem_data->labs[lab_index].graph_capacity <= 0) {
+                return 0;
+            }
+            lab_counts[lab_index] = 1;
+            remaining_students--;
+            if (remaining_students < 0) {
+                return 0;
+            }
+        }
+    }
+    for (lab_index = 0;
+         lab_index < problem_data->lab_count && remaining_students > 0;
+         lab_index++) {
+        int spare_capacity =
+            problem_data->labs[lab_index].graph_capacity - lab_counts[lab_index];
+        int add_count;
+        if (spare_capacity <= 0) {
+            continue;
+        }
+        add_count = spare_capacity < remaining_students ?
+                    spare_capacity :
+                    remaining_students;
+        lab_counts[lab_index] += add_count;
+        remaining_students -= add_count;
+    }
+    return remaining_students == 0;
+}
+
+static int average_fill_is_assignment_constant(const ProblemData *problem_data)
+{
+    return graph_capacity_sum_equals_student_count(problem_data) ||
+           positive_capacities_are_uniform(problem_data);
+}
+
+static int average_fill_target_implied_by_minimum_counts(
+    const ProblemData *problem_data,
+    RatioValue average_fill_min)
+{
+    int *minimum_counts = build_base_minimum_counts(problem_data);
+    int implied =
+        average_fill_counts_satisfy_bound(problem_data,
+                                          minimum_counts,
+                                          average_fill_min);
+    free(minimum_counts);
+    return implied;
+}
+
+static void validate_average_fill_target_support(
+    const ProblemData *problem_data)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    if (targets == NULL || !targets->has_average_fill_min) {
+        return;
+    }
+    if (average_fill_target_implied_by_minimum_counts(
+            problem_data,
+            targets->average_fill_min)) {
+        return;
+    }
+    if (average_fill_is_assignment_constant(problem_data)) {
+        int *complete_counts =
+            checked_calloc((size_t)problem_data->lab_count, sizeof(int));
+        int target_satisfied;
+        if (!build_any_complete_lab_counts(problem_data, complete_counts)) {
+            free(complete_counts);
+            fail_with_context(
+                "target constraints",
+                "No feasible solution: no complete assignment can satisfy capacity bounds");
+        }
+        target_satisfied =
+            average_fill_counts_satisfy_bound(problem_data,
+                                              complete_counts,
+                                              targets->average_fill_min);
+        free(complete_counts);
+        if (!target_satisfied) {
+            fail_with_context(
+                "target constraints",
+                "No feasible solution: average-fill target exceeds the constant fill rate");
+        }
+        return;
+    }
+    fail_with_context(
+        "target constraints",
+        "average_fill_rate hard targets need a bounded exact resource case; add a sufficient minimum_fill_rate target or use uniform capacities");
+}
+
 static void validate_target_constraints_against_problem(
     const ProblemData *problem_data)
 {
@@ -6716,6 +7032,7 @@ static void validate_target_constraints_against_problem(
         fail_with_context("target constraints",
                           "No feasible solution: average-rank/rank-sum target is below the theoretical minimum");
     }
+    validate_average_fill_target_support(problem_data);
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         int required_count = target_minimum_count_for_lab(problem_data, lab_index);
         if (required_count > problem_data->labs[lab_index].graph_capacity) {
@@ -10283,6 +10600,9 @@ static int target_constraints_count(const TargetConstraints *targets)
     if (targets->has_average_rank_max) {
         count++;
     }
+    if (targets->has_average_fill_min) {
+        count++;
+    }
     if (targets->has_rank_sum_max) {
         count++;
     }
@@ -10329,6 +10649,12 @@ static int required_targets_are_satisfied(const ProblemData *problem_data,
     if (!rank_sum_satisfies_targets(problem_data, metrics->rank_sum)) {
         return 0;
     }
+    if (targets->has_average_fill_min &&
+        !average_fill_counts_satisfy_bound(problem_data,
+                                           metrics->lab_counts,
+                                           targets->average_fill_min)) {
+        return 0;
+    }
     if (targets->has_rank_square_max &&
         metrics->rank_square_sum > targets->rank_square_max) {
         return 0;
@@ -10360,6 +10686,12 @@ static int target_constraints_pass_count(const ProblemData *problem_data,
     if (targets->has_average_rank_max &&
         target_average_rank_limit(problem_data, &rank_sum_limit) &&
         metrics->rank_sum <= rank_sum_limit) {
+        pass_count++;
+    }
+    if (targets->has_average_fill_min &&
+        average_fill_counts_satisfy_bound(problem_data,
+                                          metrics->lab_counts,
+                                          targets->average_fill_min)) {
         pass_count++;
     }
     if (targets->has_rank_sum_max && metrics->rank_sum <= targets->rank_sum_max) {
@@ -10470,6 +10802,27 @@ static void write_target_status_file(const char *target_status_path,
                                 metrics->rank_sum <= targets->rank_sum_max,
                                 (long double)targets->rank_sum_max -
                                     (long double)metrics->rank_sum,
+                                target_status_path);
+    }
+    if (targets->has_average_fill_min) {
+        char required_text[64];
+        char actual_text[64];
+        long double required_value =
+            (long double)targets->average_fill_min.numerator /
+            (long double)targets->average_fill_min.denominator;
+        int passed =
+            average_fill_counts_satisfy_bound(problem_data,
+                                              metrics->lab_counts,
+                                              targets->average_fill_min);
+        snprintf(required_text, sizeof(required_text), "%.17Lg", required_value);
+        snprintf(actual_text, sizeof(actual_text), "%.17Lg", metrics->average_fill_rate);
+        write_target_status_row(target_file,
+                                "average_fill_rate",
+                                ">=",
+                                required_text,
+                                actual_text,
+                                passed,
+                                metrics->average_fill_rate - required_value,
                                 target_status_path);
     }
     if (targets->has_rank_square_max) {
@@ -11470,6 +11823,9 @@ static void solver_profile_add_child_profile(SolverProfile *profile,
         read_profile_long_long_or_zero(profile_path, "exact_path_cost_comparisons");
     profile->biguint_score_comparisons +=
         read_profile_long_long_or_zero(profile_path, "biguint_score_comparisons");
+    profile->layered_initial_potentials_used +=
+        read_profile_long_long_or_zero(profile_path,
+                                       "layered_initial_potentials_used");
     profile->ordinary_average_scalar_attempts +=
         read_profile_long_long_or_zero(profile_path,
                                        "ordinary_average_scalar_attempts");
@@ -11833,6 +12189,9 @@ static void solver_profile_write(const char *profile_path,
         fprintf(profile_file,
                 "biguint_score_comparisons\t%lld\n",
                 profile->biguint_score_comparisons) < 0 ||
+        fprintf(profile_file,
+                "layered_initial_potentials_used\t%lld\n",
+                profile->layered_initial_potentials_used) < 0 ||
         fprintf(profile_file,
                 "ordinary_average_scalar_attempts\t%lld\n",
                 profile->ordinary_average_scalar_attempts) < 0 ||
@@ -12200,6 +12559,10 @@ static int spawn_portfolio_child(const ProgramOptions *options,
     if (options->targets.has_average_rank_max) {
         ADD_LITERAL("--require-average-rank-at-most");
         ADD_ALLOCATED(format_ratio_argument(options->targets.average_rank_max));
+    }
+    if (options->targets.has_average_fill_min) {
+        ADD_LITERAL("--require-average-fill-at-least");
+        ADD_ALLOCATED(format_ratio_argument(options->targets.average_fill_min));
     }
     if (options->targets.has_rank_sum_max) {
         ADD_LITERAL("--require-rank-sum-at-most");
@@ -12694,9 +13057,14 @@ static void load_targets_file(const char *targets_path, TargetConstraints *targe
                 parse_int_range(value_text, 0, INT_MAX / 4, targets_path));
         } else if (strcmp(metric_text, "average_fill_rate") == 0 ||
                    strcmp(metric_text, "fill_rate_average") == 0) {
-            free(line);
-            fail_with_context("target constraints",
-                              "average_fill_rate hard targets are not supported yet; use minimum_fill_rate or a report-only comparison");
+            if (strcmp(operator_text, ">=") != 0) {
+                free(line);
+                fail_with_context(targets_path,
+                                  "average_fill_rate target requires >= operator");
+            }
+            target_constraints_set_average_fill_min(
+                targets,
+                parse_ratio_bound(value_text, targets_path));
         } else {
             free(line);
             fail_with_context(targets_path, "unknown target metric");
@@ -12967,10 +13335,13 @@ static ProgramOptions parse_program_options(int argc, char **argv)
                                                        argument),
                                   argument));
         } else if (strcmp(argument, "--require-average-fill-at-least") == 0) {
-            (void)require_option_value(argc, argv, &argument_index, argument);
-            fail_with_context(
-                "target constraints",
-                "average_fill_rate hard targets are not supported yet; use minimum_fill_rate or a report-only comparison");
+            target_constraints_set_average_fill_min(
+                &options.targets,
+                parse_ratio_bound(require_option_value(argc,
+                                                       argv,
+                                                       &argument_index,
+                                                       argument),
+                                  argument));
         } else if (strcmp(argument, "--require-no-outside") == 0) {
             target_constraints_set_outside_max(&options.targets, 0);
         } else if (strcmp(argument, "--require-outside-at-most") == 0) {

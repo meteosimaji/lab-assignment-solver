@@ -350,17 +350,17 @@ Supported hard targets:
 --require-average-rank-at-most X
 --require-rank-sum-at-most N
 --require-max-rank-at-most K
+--require-average-fill-at-least X
 --require-minimum-fill-at-least X
 --require-no-outside
 --require-outside-at-most 0
 --targets FILE
 ```
 
-Reserved hard targets that are parsed and rejected until an exact
+Reserved hard targets that are parsed and rejected until a broader exact
 resource-constrained engine is available:
 
 ```text
---require-average-fill-at-least X
 --require-rank-square-at-most N
 --require-outside-at-most N   # N > 0
 ```
@@ -370,11 +370,14 @@ resource-constrained engine is available:
 outside-at-most-zero are enforced directly by the flow model.  Average-rank and
 rank-sum hard targets are exact for `rubric`, `balanced`, `guarded`, and `fair`.
 `minimum_fill_rate` is supported because it becomes per-laboratory lower
-bounds.  `average_fill_rate` hard targets are intentionally not enabled for
-arbitrary objectives yet because they are global rational side constraints.
-Likewise, rank-square, outside-count above zero, and changed-student-count hard
-targets are rejected until an exact resource-constrained engine is enabled for
-them.  Average-rank and rank-sum hard targets are also rejected with a positive
+bounds.  `average_fill_rate` is a global rational side constraint, so it is
+enabled only when the existing lower bounds already imply the requested average
+fill, or when average fill is constant for every complete assignment, such as
+uniform positive capacities.  Other average-fill hard-target combinations are
+rejected rather than treated as heuristics.  Likewise, rank-square,
+outside-count above zero, and changed-student-count hard targets are rejected
+until an exact resource-constrained engine is enabled for them.  Average-rank
+and rank-sum hard targets are also rejected with a positive
 `--change-penalty`, because the current rank-first cost component then becomes
 `rank_sum + change_penalty * changed_students` rather than the pure rank sum.
 Unsupported combinations are rejected instead of silently becoming heuristics.

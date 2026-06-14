@@ -53,6 +53,13 @@ safety conditions are not met.
 - Weighted-exact average-fill scalar safety checks use the active rank upper
   bound (`q_end`) when hard targets forbid larger ranks, avoiding overflow
   fallbacks caused by assignment edges that cannot appear in any searched box.
+- Average-fill hard targets are accepted for exact bounded cases: when current
+  minimum-count constraints imply the target, or when average fill is constant
+  over complete assignments.  Other average-fill resource constraints still
+  reject explicitly instead of using a heuristic side constraint.
+- Initial min-cost-flow potentials use layered DAG relaxation on fresh
+  assignment graphs and fall back to the previous queue method if the graph is
+  not in layer order.
 - Weighted-exact can seed its incumbent with additional light exact objectives
   on larger threshold grids.  These seeds are upper bounds for pruning only;
   the final solution is still certified by branch-and-bound.
@@ -77,7 +84,8 @@ Planned safe order:
    ordering.
 3. Run the scalarized min-cost-flow path with the current heap and compare
    objective values against the existing path.
-4. Use a radix heap for general monotone unsigned Dijkstra keys.
+4. Use a radix heap for general monotone unsigned Dijkstra keys only after
+   tuple costs are safely scalarized.
 5. Use a Dial bucket queue only when the maximum reduced edge cost is small.
 
 This is a performance optimization only.  It must not change the mathematical
@@ -89,7 +97,9 @@ unsafe.
 - Cache student groups across threshold and ratio checks when the grouping key
   includes all state that affects allowed edges and costs.
 - Reuse immutable min-cost-flow graph templates for repeated solves with the
-  same rank threshold and different minimum-count vectors.
+  same rank threshold and different minimum-count vectors.  This remains a
+  future step because residual capacities and reverse-edge ownership must stay
+  isolated for ASan-clean repeated solves.
 - Represent student group signatures sparsely for short preference lists.
 - Investigate outside-preference edge compression only under strict conditions
   that preserve listed-vs-unlisted laboratory identity.

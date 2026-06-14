@@ -2417,16 +2417,17 @@ B 1
     assert not output_path.exists()
 
 
-def test_require_average_fill_hard_target_is_rejected_until_exact_engine(tmp_path):
+def test_require_average_fill_hard_target_succeeds_for_uniform_capacities(tmp_path):
     lab_text = """\
 2
-A 1
-B 1
+A 2
+B 2
 """
     preference_text = """\
-2 2
+3 2
 00001 A B
 00002 B A
+00003 A B
 """
     completed, output_path = run_solver(
         tmp_path,
@@ -2437,8 +2438,73 @@ B 1
             "50%",
         ],
     )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    metrics = read_metrics(output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert float(metrics["average_fill_rate"]) >= 0.5
+    assert {row["target"]: row["status"] for row in rows} == {
+        "average_fill_rate": "pass",
+    }
+
+
+def test_require_average_fill_hard_target_is_supported_when_min_fill_implies_it(tmp_path):
+    lab_text = """\
+2
+A 2
+B 4
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 B A
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--require-minimum-fill-at-least",
+            "50%",
+            "--require-average-fill-at-least",
+            "50%",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert {row["target"]: row["status"] for row in rows} == {
+        "average_fill_rate": "pass",
+        "minimum_fill_rate": "pass",
+    }
+
+
+def test_require_average_fill_hard_target_rejects_unsupported_resource_case(tmp_path):
+    lab_text = """\
+2
+A 2
+B 4
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 B A
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--require-average-fill-at-least",
+            "75%",
+        ],
+    )
     assert completed.returncode != 0
-    assert "average_fill_rate hard targets are not supported yet" in completed.stderr
+    assert "average_fill_rate hard targets need a bounded exact resource case" in completed.stderr
     assert not output_path.exists()
 
 
