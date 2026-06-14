@@ -165,9 +165,15 @@ feasible set or objective value.
   `T*M - U_scaled`, with `M` larger than any possible `U_scaled` difference.
   The bound only uses ranks whose edges are present under the current
   max-rank threshold, and the fill-reward range is bounded by the top and
-  bottom `N` capacity-limited reward slots.  If the safety checks fail, the
-  BigUInt exact-average comparison is used unchanged.
+  bottom `N` reward slots after each laboratory is capped by both its graph
+  capacity and the number of students with an active edge to that laboratory.
+  If the safety checks fail, the BigUInt exact-average comparison is used
+  unchanged.
 - Relaxed-corner cache: repeated weighted-exact corners are solved once.
+- Weighted average-fill scalar bounds: when a hard rank upper bound limits the
+  weighted-exact search range, the scalar safety check only needs rank costs
+  up to that active upper bound.  Edges with larger rank cannot be present in
+  any weighted corner solve.
 - Portfolio process parallelism: independent exact objective candidates run in
   parallel and are reduced deterministically.
 

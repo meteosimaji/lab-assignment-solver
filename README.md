@@ -726,9 +726,10 @@ tie-break.  The solver minimizes `rank_square * M - U_scaled`, where
 possible fill-reward difference.  This preserves the `(rank_square, -Uavg)`
 order exactly.  The safety check only considers rank costs for edges that are
 active under the current max-rank threshold, and it bounds the possible
-`U_scaled` difference by sorting capacity-limited fill-reward slots.  If any
-overflow or bound check fails, the solver falls back to the BigUInt
-exact-average path.
+`U_scaled` difference by sorting fill-reward slots capped both by laboratory
+capacity and by the number of students that can actually reach each laboratory
+under that threshold.  If any overflow or bound check fails, the solver falls
+back to the BigUInt exact-average path.
 
 In the fair-mode path, when all active students have the same rank table after
 the worst-rank threshold is fixed, the solver switches to an exact count-based
@@ -768,7 +769,10 @@ improve the incumbent.  This is still an exact weighted optimizer, not a
 candidate-selection heuristic.  Equivalent minimum-fill thresholds are
 compressed by their induced lower-bound vectors.  Max-rank thresholds are also
 compressed to the rank values that actually change the student-lab edge set,
-plus the forced-placement sentinel rank.
+plus the forced-placement sentinel rank.  When a max-rank hard target or
+outside-forbidden target gives a smaller rank upper bound, the weighted
+average-fill scalar safety check uses that active bound rather than the
+outside sentinel.
 
 ## Reproducible Verification
 

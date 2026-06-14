@@ -44,11 +44,15 @@ safety conditions are not met.
   BigUInt exact-average path is used unchanged.  The safety bound only uses
   rank costs for ranks active under the current max-rank threshold, and its
   big-M reward range is computed from the largest and smallest feasible
-  capacity-limited fill-reward slot sums rather than from the coarser
+  fill-reward slot sums after each laboratory is capped by both graph capacity
+  and active incoming students, rather than from the coarser
   `student_count * (max_reward - min_reward)` bound.
 - Weighted-exact branch-and-bound splits boxes by weighted objective spread
   (`max_rank` spread versus `minimum_fill` spread) before falling back to index
   width.  This changes only search order, not the lower-bound proof.
+- Weighted-exact average-fill scalar safety checks use the active rank upper
+  bound (`q_end`) when hard targets forbid larger ranks, avoiding overflow
+  fallbacks caused by assignment edges that cannot appear in any searched box.
 - Weighted-exact can seed its incumbent with additional light exact objectives
   on larger threshold grids.  These seeds are upper bounds for pruning only;
   the final solution is still certified by branch-and-bound.

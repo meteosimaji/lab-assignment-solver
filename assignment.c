@@ -5140,25 +5140,48 @@ static int sum_extreme_average_rewards(const AverageRewardBucket *buckets,
 
 static int ordinary_average_reward_difference_bound(
     const ProblemData *problem_data,
+    int best_max_rank,
     const long long *lab_average_rewards,
     long long *out_difference_bound)
 {
     AverageRewardBucket *buckets =
         checked_malloc((size_t)problem_data->lab_count *
                        sizeof(AverageRewardBucket));
+    int *active_incoming_counts =
+        checked_calloc((size_t)problem_data->lab_count, sizeof(int));
     int bucket_count = 0;
     int lab_index;
+    int student_index;
     long long maximum_reward_sum;
     long long minimum_reward_sum;
 
+    for (student_index = 0;
+         student_index < problem_data->student_count;
+         student_index++) {
+        for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+            if (assignment_edge_allowed(problem_data,
+                                        student_index,
+                                        lab_index,
+                                        best_max_rank)) {
+                active_incoming_counts[lab_index]++;
+            }
+        }
+    }
+
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        int effective_capacity;
+
         if (problem_data->labs[lab_index].capacity_value <= 0LL ||
-            problem_data->labs[lab_index].graph_capacity <= 0) {
+            problem_data->labs[lab_index].graph_capacity <= 0 ||
+            active_incoming_counts[lab_index] <= 0) {
             continue;
         }
+        effective_capacity = problem_data->labs[lab_index].graph_capacity;
+        if (effective_capacity > active_incoming_counts[lab_index]) {
+            effective_capacity = active_incoming_counts[lab_index];
+        }
         buckets[bucket_count].reward = lab_average_rewards[lab_index];
-        buckets[bucket_count].capacity =
-            problem_data->labs[lab_index].graph_capacity;
+        buckets[bucket_count].capacity = effective_capacity;
         bucket_count++;
     }
 
@@ -5173,11 +5196,13 @@ static int ordinary_average_reward_difference_bound(
                                      0,
                                      &minimum_reward_sum) ||
         maximum_reward_sum < minimum_reward_sum) {
+        free(active_incoming_counts);
         free(buckets);
         return 0;
     }
 
     *out_difference_bound = maximum_reward_sum - minimum_reward_sum;
+    free(active_incoming_counts);
     free(buckets);
     return 1;
 }
@@ -5260,6 +5285,7 @@ static OrdinaryAverageFastPath ordinary_average_fast_path_create(
     }
 
     if (!ordinary_average_reward_difference_bound(problem_data,
+                                                  best_max_rank,
                                                   fast_path.lab_average_rewards,
                                                   &max_reward_difference)) {
         ordinary_average_fast_path_free(&fast_path);
@@ -5268,7 +5294,16 @@ static OrdinaryAverageFastPath ordinary_average_fast_path_create(
         }
         return fast_path;
     }
-    third_multiplier = max_reward_difference + 1LL;
+    if (!add_nonnegative_ll_fits(max_reward_difference,
+                                 1LL,
+                                 LLONG_MAX,
+                                 &third_multiplier)) {
+        ordinary_average_fast_path_free(&fast_path);
+        if (active_profile != NULL) {
+            active_profile->ordinary_average_scalar_fallback_overflow++;
+        }
+        return fast_path;
+    }
     per_unit_limit = INF_COST / (long long)problem_data->student_count / 8LL;
     if (third_multiplier <= 0LL || per_unit_limit <= 0LL) {
         ordinary_average_fast_path_free(&fast_path);
@@ -8367,7 +8402,8 @@ static void weighted_average_fast_path_free(WeightedAverageFastPath *fast_path)
 static WeightedAverageFastPath weighted_average_fast_path_create(
     const ProblemData *problem_data,
     const ExactAverageContext *context,
-    const WeightedObjective *weights)
+    const WeightedObjective *weights,
+    int best_max_rank)
 {
     WeightedAverageFastPath fast_path;
     unsigned long long lcm_u64 = 0ULL;
@@ -8406,7 +8442,13 @@ static WeightedAverageFastPath weighted_average_fast_path_create(
         return fast_path;
     }
 
-    rank_limit = (long long)problem_data->lab_count + 1LL;
+    rank_limit = (long long)best_max_rank;
+    if (rank_limit > (long long)problem_data->lab_count + 1LL) {
+        rank_limit = (long long)problem_data->lab_count + 1LL;
+    }
+    if (rank_limit < 1LL) {
+        return fast_path;
+    }
     if (!multiply_nonnegative_ll_fits(rank_limit,
                                       rank_limit,
                                       per_edge_limit,
@@ -9132,8 +9174,7 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
         return solve_weighted_exact_integer_only_problem(problem_data, active_weights);
     }
     ExactAverageContext score_context = exact_average_context_create(problem_data);
-    WeightedAverageFastPath average_fast_path =
-        weighted_average_fast_path_create(problem_data, &score_context, active_weights);
+    WeightedAverageFastPath average_fast_path;
     MinimumCountCandidateList minimum_candidates =
         build_minimum_count_candidates(problem_data, active_weights->minimum_fill != 0LL);
     IntList rank_candidates = build_rank_threshold_candidates(problem_data);
@@ -9149,6 +9190,10 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
     WeightedRelaxedCornerCache relaxed_corner_cache;
     WeightedStudentGroupCache student_group_cache;
 
+    average_fast_path.available = 0;
+    average_fast_path.scaled_weights = *active_weights;
+    average_fast_path.lab_average_rewards = NULL;
+
     q_start = active_weights->max_rank == 0LL ?
                   q_end :
                   find_minimum_feasible_max_rank(problem_data);
@@ -9160,6 +9205,12 @@ static int *solve_weighted_exact_problem(const ProblemData *problem_data,
         fail_with_context("target constraints",
                           "No feasible solution: max-rank target leaves no allowable rank");
     }
+
+    average_fast_path =
+        weighted_average_fast_path_create(problem_data,
+                                          &score_context,
+                                          active_weights,
+                                          q_end);
 
     first_q_index = int_list_first_index_at_least(&rank_candidates, q_start);
     last_q_index = int_list_last_index_at_most(&rank_candidates, q_end);
