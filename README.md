@@ -292,7 +292,8 @@ are:
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
   `ordinary_average_scalar_used`, `active_arc_template_hits`,
   `active_arc_template_misses`, `radix_heap_used`,
-  `radix_heap_fallbacks`,
+  `radix_heap_fallbacks`, `average_fill_resource_vectors_tested`,
+  `average_fill_resource_vector_limit_hits`,
   branch-and-bound counters, and phase CPU timings.  The legacy
   `weighted_score_comparisons` key is still written as an alias for
   `exact_path_cost_comparisons`.
@@ -301,14 +302,15 @@ are:
 
 Hard targets restrict the feasible region before the selected objective is
 optimized.  They do not replace the objective.  For example, the command below
-means: first require average rank at most 2.0, no laboratory below 25% fill, and
-no outside-preference assignment; then find the best `fair` solution inside
-that target-satisfying region.
+means: first require average rank at most 2.0, average fill at least 50%, no
+laboratory below 25% fill, and no outside-preference assignment; then find the
+best `fair` solution inside that target-satisfying region.
 
 ```sh
 ./assign_labs labs.txt prefs.txt out.txt \
   --objective fair \
   --require-average-rank-at-most 2.0 \
+  --require-average-fill-at-least 50% \
   --require-minimum-fill-at-least 25% \
   --require-outside-at-most 0 \
   --reports
@@ -326,6 +328,7 @@ The same targets can be stored in a file:
 ```text
 # targets/winning_line.txt
 average_rank <= 2.0
+average_fill_rate >= 50%
 minimum_fill_rate >= 25%
 outside_preference_count <= 0
 ```
@@ -342,6 +345,7 @@ Example `out.txt.target_status.tsv`:
 ```tsv
 target	operator	required	actual	status	margin
 average_rank	<=	2	1.5	pass	0.5
+average_fill_rate	>=	0.5	0.75	pass	0.25
 minimum_fill_rate	>=	0.25	0.5	pass	0.25
 outside_preference_count	<=	0	0	pass	0
 ```
@@ -372,11 +376,19 @@ resource-constrained engine is available:
 outside-at-most-zero are enforced directly by the flow model.  Average-rank and
 rank-sum hard targets are exact for `rubric`, `balanced`, `guarded`, and `fair`.
 `minimum_fill_rate` is supported because it becomes per-laboratory lower
-bounds.  `average_fill_rate` is a global rational side constraint, so it is
-enabled only when the existing lower bounds already imply the requested average
-fill, or when average fill is constant for every complete assignment, such as
-uniform positive capacities.  Other average-fill hard-target combinations are
-rejected rather than treated as heuristics.  Likewise, rank-square,
+bounds.  `average_fill_rate` is a global rational side constraint.  When it is
+not already implied by lower bounds and is not constant over all complete
+assignments, supported single objectives use a bounded exact count-vector
+engine: the solver enumerates laboratory count vectors satisfying capacities,
+minimum-count targets, total student count, and the exact scaled
+average-fill bound; for each retained vector it solves the selected
+rank-first or fair objective exactly with min-cost flow; then it keeps the
+best candidate in the selected objective order.  This is enabled for
+`rubric`, `satisfaction`, `balanced`, `fair`, and `guarded` when the exact
+resource scaling fits and the count-vector limit is not exceeded.  Unsupported
+average-fill combinations, including `weighted-exact`, `fill-convex`, and
+portfolio mode, are rejected rather than treated as heuristics.  Likewise,
+rank-square,
 outside-count above zero, and changed-student-count hard targets are rejected
 until an exact resource-constrained engine is enabled for them.  Average-rank
 and rank-sum hard targets are also rejected with a positive
@@ -795,6 +807,14 @@ scales large enough for every simple path in the current residual graph.  If
 the check fails, the solver immediately uses the existing binary heap.  Profile
 counters `radix_heap_attempts`, `radix_heap_used`, and
 `radix_heap_fallbacks` show which path was taken.
+
+Nontrivial `average_fill_rate` hard targets use a bounded exact count-vector
+engine for the supported objectives.  Its profile counters
+`average_fill_resource_vectors_tested` and
+`average_fill_resource_vector_limit_hits` show how many laboratory-count
+vectors were considered and whether the exact enumeration safety limit was
+reached.  If the limit is reached, the run fails explicitly instead of
+falling back to a heuristic.
 
 ## Reproducible Verification
 

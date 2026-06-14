@@ -150,6 +150,8 @@ FIELDNAMES = [
     "radix_heap_attempts",
     "radix_heap_used",
     "radix_heap_fallbacks",
+    "average_fill_resource_vectors_tested",
+    "average_fill_resource_vector_limit_hits",
 ]
 
 
@@ -322,6 +324,12 @@ def run_case_once(case, repeat_index, binary, bench_dir):
         "radix_heap_attempts": profile.get("radix_heap_attempts", ""),
         "radix_heap_used": profile.get("radix_heap_used", ""),
         "radix_heap_fallbacks": profile.get("radix_heap_fallbacks", ""),
+        "average_fill_resource_vectors_tested": profile.get(
+            "average_fill_resource_vectors_tested", ""
+        ),
+        "average_fill_resource_vector_limit_hits": profile.get(
+            "average_fill_resource_vector_limit_hits", ""
+        ),
     }
 
 

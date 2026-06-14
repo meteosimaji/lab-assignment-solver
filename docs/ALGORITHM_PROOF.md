@@ -174,11 +174,19 @@ feasible set or objective value.
   weighted-exact search range, the scalar safety check only needs rank costs
   up to that active upper bound.  Edges with larger rank cannot be present in
   any weighted corner solve.
-- Average-fill hard targets: the global average-fill target is accepted only
-  when it is already implied by per-laboratory lower bounds or when average
-  fill is constant over all complete assignments.  In both cases the target
-  cannot change the selected objective's feasible search order; otherwise the
-  run is rejected instead of treated heuristically.
+- Average-fill hard targets: if the target is already implied by lower bounds
+  or average fill is constant, the target cannot change the feasible search
+  order.  Otherwise, supported single objectives use a bounded exact
+  count-vector engine.  Let \(L\) be the common denominator of positive
+  capacities and \(U_s(x)=\sum_j n_j(x)L/c_j\).  The engine enumerates lab-count
+  vectors satisfying all lower/upper bounds, \(\sum_j n_j=N\), and the exact
+  integer inequality for \(U_{\mathrm{avg}}\ge\alpha\).  For each retained
+  vector, the sum of lower bounds is \(N\), so using the vector as
+  min-cost-flow lower bounds fixes the counts exactly.  The solver then
+  optimizes the selected rank-first or fair objective exactly inside that
+  count slice and compares slices in the selected objective order.  If the
+  exact vector limit or scaling bounds are exceeded, the run is rejected
+  instead of treated heuristically.
 - Layered initial potentials: fresh assignment min-cost-flow graphs have only
   forward residual capacity on source-to-student/group, student/group-to-lab,
   and lab-to-sink edges.  A single topological relaxation gives the same

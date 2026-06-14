@@ -782,8 +782,8 @@ safety check for this weighted average-fill path only needs to consider rank
 costs up to \(q_{\max}\), because no weighted corner solve can insert edges
 with larger ranks.
 
-Average-fill hard targets are accepted only in exact bounded cases.  If the
-existing laboratory lower bounds already imply
+Average-fill hard targets are accepted only through exact bounded cases.  If
+the existing laboratory lower bounds already imply
 \[
   U_{\mathrm{avg}}\ge \alpha,
 \]
@@ -791,8 +791,22 @@ then adding the target does not change the feasible region.  If average fill
 is constant over complete assignments, for example when all positive
 capacities are equal, the target either rejects the whole instance as
 infeasible or again leaves the selected objective's feasible region unchanged.
-Other average-fill side constraints are global rational resource constraints;
-the implementation rejects them rather than silently using a heuristic.
+For supported single objectives, the remaining nontrivial cases use a bounded
+count-vector engine.  Let \(L\) be the common denominator of the positive
+capacities and define
+\[
+  U_s(n)=\sum_{j:c_j>0} n_j\frac{L}{c_j}.
+\]
+The hard target \(U_{\mathrm{avg}}\ge\alpha\) becomes one integer inequality on
+\(U_s(n)\).  The implementation enumerates laboratory count vectors satisfying
+all lower bounds, graph-capacity upper bounds, \(\sum_j n_j=N\), and this
+integer resource inequality.  For each retained vector, using \(n_j\) as the
+minimum count for laboratory \(j\) fixes the counts exactly because the lower
+bound sum is \(N\).  The solver then runs the appropriate exact min-cost-flow
+subproblem for the selected rank-first or fair objective and compares all
+count slices in that same objective order.  If the common-denominator scaling
+or the exact count-vector bound is too large, the run is rejected rather than
+silently using a heuristic.
 Equivalent minimum-fill thresholds are compressed by their induced
 lower-bound-count vectors.  Max-rank thresholds are compressed to the ranks
 that can actually change the student--laboratory edge set, together with the

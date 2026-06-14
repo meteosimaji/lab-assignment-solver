@@ -28,6 +28,7 @@
 #define MAX_CONFIG_WEIGHT 1000000000LL
 #define PRINT_RANK_COST_SAMPLE_LIMIT 8
 #define AVERAGE_FILL_LINEAR_PROBE_LIMIT 8
+#define AVERAGE_FILL_RESOURCE_VECTOR_LIMIT 20000
 #define RADIX_HEAP_SCAN_EDGE_LIMIT 200000
 #define WEIGHTED_SEED_MAX_Q_AXIS 32
 #define WEIGHTED_SEED_MIN_GRID_SIZE 128LL
@@ -346,6 +347,13 @@ typedef struct {
     long long *lab_average_rewards;
 } OrdinaryAverageFastPath;
 
+typedef struct {
+    int available;
+    long long *resource_by_lab;
+    long long target_resource;
+    long long maximum_resource;
+} AverageFillResourceContext;
+
 typedef enum {
     AVERAGE_REWARD_NONE,
     AVERAGE_REWARD_SECOND,
@@ -386,6 +394,8 @@ typedef struct {
     long long radix_heap_attempts;
     long long radix_heap_used;
     long long radix_heap_fallbacks;
+    long long average_fill_resource_vectors_tested;
+    long long average_fill_resource_vector_limit_hits;
     long long weighted_bound_prunes;
     long long weighted_corner_cache_hits;
     long long weighted_corner_cache_misses;
@@ -617,6 +627,8 @@ static StudentGroups build_student_groups(const ProblemData *problem_data,
 static void free_student_groups(StudentGroups *groups);
 static long long max_rank_for_solution(const ProblemData *problem_data,
                                        const int *assignment);
+static int find_fair_max_rank_satisfying_rank_sum_targets(
+    const ProblemData *problem_data);
 static SolutionResult empty_solution_result(void);
 static int first_choice_lab_for_student(const ProblemData *problem_data,
                                         int student_index);
@@ -7532,17 +7544,107 @@ static int average_fill_target_implied_by_minimum_counts(
     return implied;
 }
 
-static void validate_average_fill_target_support(
-    const ProblemData *problem_data)
+static void average_fill_resource_context_free(
+    AverageFillResourceContext *resource_context)
 {
-    const TargetConstraints *targets = problem_data->targets;
-    if (targets == NULL || !targets->has_average_fill_min) {
-        return;
+    free(resource_context->resource_by_lab);
+    resource_context->resource_by_lab = NULL;
+    resource_context->available = 0;
+    resource_context->target_resource = 0LL;
+    resource_context->maximum_resource = 0LL;
+}
+
+static AverageFillResourceContext average_fill_resource_context_create(
+    const ProblemData *problem_data,
+    RatioValue average_fill_min)
+{
+    AverageFillResourceContext resource_context;
+    ExactAverageContext exact_average_context =
+        exact_average_context_create(problem_data);
+    unsigned long long lcm_u64;
+    long long lcm_value;
+    long long numerator_times_lab_count;
+    long long scaled_target_numerator;
+    long long target_with_rounding;
+    int lab_index;
+
+    resource_context.available = 0;
+    resource_context.resource_by_lab = NULL;
+    resource_context.target_resource = 0LL;
+    resource_context.maximum_resource = 0LL;
+
+    if (exact_average_context.positive_lab_count <= 0 ||
+        !big_uint_to_u64_checked(&exact_average_context.common_denominator,
+                                 &lcm_u64) ||
+        lcm_u64 > (unsigned long long)LLONG_MAX) {
+        exact_average_context_free(&exact_average_context);
+        return resource_context;
     }
-    if (average_fill_target_implied_by_minimum_counts(
-            problem_data,
-            targets->average_fill_min)) {
-        return;
+    lcm_value = (long long)lcm_u64;
+    if (!multiply_nonnegative_ll_fits(
+            average_fill_min.numerator,
+            (long long)exact_average_context.positive_lab_count,
+            LLONG_MAX,
+            &numerator_times_lab_count) ||
+        !multiply_nonnegative_ll_fits(numerator_times_lab_count,
+                                      lcm_value,
+                                      LLONG_MAX,
+                                      &scaled_target_numerator) ||
+        !add_nonnegative_ll_fits(scaled_target_numerator,
+                                 average_fill_min.denominator - 1LL,
+                                 LLONG_MAX,
+                                 &target_with_rounding)) {
+        exact_average_context_free(&exact_average_context);
+        return resource_context;
+    }
+
+    resource_context.resource_by_lab =
+        checked_calloc((size_t)problem_data->lab_count, sizeof(long long));
+    resource_context.target_resource =
+        target_with_rounding / average_fill_min.denominator;
+
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        long long capacity_value = problem_data->labs[lab_index].capacity_value;
+        long long lab_maximum_resource;
+        if (capacity_value <= 0LL) {
+            continue;
+        }
+        if (lcm_u64 % (unsigned long long)capacity_value != 0ULL ||
+            lcm_u64 / (unsigned long long)capacity_value >
+                (unsigned long long)LLONG_MAX) {
+            average_fill_resource_context_free(&resource_context);
+            exact_average_context_free(&exact_average_context);
+            return resource_context;
+        }
+        resource_context.resource_by_lab[lab_index] =
+            (long long)(lcm_u64 / (unsigned long long)capacity_value);
+        if (!multiply_nonnegative_ll_fits(
+                resource_context.resource_by_lab[lab_index],
+                (long long)problem_data->labs[lab_index].graph_capacity,
+                LLONG_MAX,
+                &lab_maximum_resource) ||
+            !add_nonnegative_ll_fits(resource_context.maximum_resource,
+                                     lab_maximum_resource,
+                                     LLONG_MAX,
+                                     &resource_context.maximum_resource)) {
+            average_fill_resource_context_free(&resource_context);
+            exact_average_context_free(&exact_average_context);
+            return resource_context;
+        }
+    }
+
+    resource_context.available = 1;
+    exact_average_context_free(&exact_average_context);
+    return resource_context;
+}
+
+static int average_fill_target_has_passive_support(
+    const ProblemData *problem_data,
+    RatioValue average_fill_min)
+{
+    if (average_fill_target_implied_by_minimum_counts(problem_data,
+                                                      average_fill_min)) {
+        return 1;
     }
     if (average_fill_is_assignment_constant(problem_data)) {
         int *complete_counts =
@@ -7557,22 +7659,64 @@ static void validate_average_fill_target_support(
         target_satisfied =
             average_fill_counts_satisfy_bound(problem_data,
                                               complete_counts,
-                                              targets->average_fill_min);
+                                              average_fill_min);
         free(complete_counts);
         if (!target_satisfied) {
             fail_with_context(
                 "target constraints",
                 "No feasible solution: average-fill target exceeds the constant fill rate");
         }
+        return 1;
+    }
+    return 0;
+}
+
+static void validate_average_fill_target_support(
+    const ProblemData *problem_data,
+    const ProgramOptions *options)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    if (targets == NULL || !targets->has_average_fill_min) {
         return;
     }
-    fail_with_context(
-        "target constraints",
-        "average_fill_rate hard targets need a bounded exact resource case; add a sufficient minimum_fill_rate target or use uniform capacities");
+    if (average_fill_target_has_passive_support(problem_data,
+                                                targets->average_fill_min)) {
+        return;
+    }
+    if (options->portfolio_mode ||
+        options->change_penalty > 0LL ||
+        (options->objective_mode != OBJECTIVE_RUBRIC &&
+         options->objective_mode != OBJECTIVE_SATISFACTION &&
+         options->objective_mode != OBJECTIVE_BALANCED &&
+         options->objective_mode != OBJECTIVE_FAIR &&
+         options->objective_mode != OBJECTIVE_GUARDED)) {
+        fail_with_context(
+            "target constraints",
+            "average_fill_rate hard targets need a supported bounded-resource objective");
+    }
+    {
+        AverageFillResourceContext resource_context =
+            average_fill_resource_context_create(problem_data,
+                                                 targets->average_fill_min);
+        if (!resource_context.available) {
+            fail_with_context(
+                "target constraints",
+                "average_fill_rate hard target resource scaling is too large for the bounded exact engine");
+        }
+        if (resource_context.target_resource >
+            resource_context.maximum_resource) {
+            average_fill_resource_context_free(&resource_context);
+            fail_with_context(
+                "target constraints",
+                "No feasible solution: average-fill target exceeds total capacity");
+        }
+        average_fill_resource_context_free(&resource_context);
+    }
 }
 
 static void validate_target_constraints_against_problem(
-    const ProblemData *problem_data)
+    const ProblemData *problem_data,
+    const ProgramOptions *options)
 {
     const TargetConstraints *targets = problem_data->targets;
     long long rank_sum_limit;
@@ -7586,7 +7730,7 @@ static void validate_target_constraints_against_problem(
         fail_with_context("target constraints",
                           "No feasible solution: average-rank/rank-sum target is below the theoretical minimum");
     }
-    validate_average_fill_target_support(problem_data);
+    validate_average_fill_target_support(problem_data, options);
     for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
         int required_count = target_minimum_count_for_lab(problem_data, lab_index);
         if (required_count > problem_data->labs[lab_index].graph_capacity) {
@@ -8829,6 +8973,641 @@ static int *solve_rank_first_problem(const ProblemData *problem_data,
     free_student_groups(&active_groups);
     free(base_minimum_counts);
     return assignment;
+}
+
+typedef struct {
+    const ProblemData *problem_data;
+    int q_upper_bound;
+    FillTieOrder fill_tie_order;
+    int max_rank_first;
+    const RankCostModel *rank_cost_model;
+    const AverageFillResourceContext *resource_context;
+    int *lower_counts;
+    int *suffix_min_counts;
+    int *suffix_max_counts;
+    int *current_counts;
+    int vectors_tested;
+    int limit_hit;
+    int best_is_set;
+    SolutionResult best_solution;
+    long long best_max_rank;
+    long long best_average_resource;
+    RatioValue best_minimum_fill;
+} AverageFillResourceSearch;
+
+static long long average_fill_resource_for_counts(
+    const ProblemData *problem_data,
+    const AverageFillResourceContext *resource_context,
+    const int *lab_counts)
+{
+    int lab_index;
+    long long total_resource = 0LL;
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        long long lab_resource;
+        if (resource_context->resource_by_lab[lab_index] == 0LL ||
+            lab_counts[lab_index] == 0) {
+            continue;
+        }
+        if (!multiply_nonnegative_ll_fits(
+                resource_context->resource_by_lab[lab_index],
+                (long long)lab_counts[lab_index],
+                LLONG_MAX,
+                &lab_resource) ||
+            !add_nonnegative_ll_fits(total_resource,
+                                     lab_resource,
+                                     LLONG_MAX,
+                                     &total_resource)) {
+            fail_with_context("average-fill resource target",
+                              "resource score overflow");
+        }
+    }
+    return total_resource;
+}
+
+static RatioValue minimum_fill_ratio_for_counts(
+    const ProblemData *problem_data,
+    const int *lab_counts)
+{
+    RatioValue best_ratio;
+    int lab_index;
+    int has_ratio = 0;
+    best_ratio.numerator = 0LL;
+    best_ratio.denominator = 1LL;
+    for (lab_index = 0; lab_index < problem_data->lab_count; lab_index++) {
+        long long capacity_value = problem_data->labs[lab_index].capacity_value;
+        RatioValue candidate;
+        if (capacity_value <= 0LL) {
+            continue;
+        }
+        candidate.numerator = (long long)lab_counts[lab_index];
+        candidate.denominator = capacity_value;
+        if (!has_ratio || ratio_compare_value(candidate, best_ratio) < 0) {
+            best_ratio = candidate;
+            has_ratio = 1;
+        }
+    }
+    return ratio_value_reduce(best_ratio);
+}
+
+static int bounded_resource_candidate_better(
+    int max_rank_first,
+    FillTieOrder fill_tie_order,
+    const SolutionResult *candidate_solution,
+    long long candidate_max_rank,
+    long long candidate_average_resource,
+    RatioValue candidate_minimum_fill,
+    const SolutionResult *best_solution,
+    long long best_max_rank,
+    long long best_average_resource,
+    RatioValue best_minimum_fill)
+{
+    if (max_rank_first) {
+        int fill_comparison;
+        if (candidate_max_rank != best_max_rank) {
+            return candidate_max_rank < best_max_rank;
+        }
+        if (candidate_solution->total_cost.second !=
+            best_solution->total_cost.second) {
+            return candidate_solution->total_cost.second <
+                   best_solution->total_cost.second;
+        }
+        if (candidate_solution->total_cost.third !=
+            best_solution->total_cost.third) {
+            return candidate_solution->total_cost.third <
+                   best_solution->total_cost.third;
+        }
+        fill_comparison =
+            ratio_compare_value(candidate_minimum_fill, best_minimum_fill);
+        if (fill_comparison != 0) {
+            return fill_comparison > 0;
+        }
+        return candidate_average_resource > best_average_resource;
+    }
+    if (candidate_solution->total_cost.second !=
+        best_solution->total_cost.second) {
+        return candidate_solution->total_cost.second <
+               best_solution->total_cost.second;
+    }
+    if (candidate_solution->total_cost.third !=
+        best_solution->total_cost.third) {
+        return candidate_solution->total_cost.third <
+               best_solution->total_cost.third;
+    }
+    if (candidate_max_rank != best_max_rank) {
+        return candidate_max_rank < best_max_rank;
+    }
+    if (fill_tie_order == FILL_TIE_AVERAGE_THEN_MINIMUM) {
+        if (candidate_average_resource != best_average_resource) {
+            return candidate_average_resource > best_average_resource;
+        }
+        return ratio_compare_value(candidate_minimum_fill,
+                                   best_minimum_fill) > 0;
+    }
+    if (ratio_compare_value(candidate_minimum_fill, best_minimum_fill) != 0) {
+        return ratio_compare_value(candidate_minimum_fill,
+                                   best_minimum_fill) > 0;
+    }
+    return candidate_average_resource > best_average_resource;
+}
+
+static OptionalSolutionResult solve_rank_first_for_exact_counts(
+    const ProblemData *problem_data,
+    int q_upper_bound,
+    const int *exact_lab_counts,
+    const RankCostModel *rank_cost_model,
+    long long *out_max_rank)
+{
+    OptionalSolutionResult result;
+    OptionalSolutionResult base_solution;
+    StudentGroups active_groups =
+        build_student_groups(problem_data,
+                             q_upper_bound,
+                             STUDENT_GROUP_ACTIVE_RANK);
+    const StudentGroups *active_group_pointer =
+        active_groups.count < problem_data->student_count ? &active_groups : NULL;
+    int best_max_rank;
+
+    result.feasible = 0;
+    result.solution = empty_solution_result();
+
+    base_solution =
+        try_solve_with_minimum_counts(problem_data,
+                                      q_upper_bound,
+                                      exact_lab_counts,
+                                      0,
+                                      0,
+                                      NULL,
+                                      rank_cost_model,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      active_group_pointer);
+    free_student_groups(&active_groups);
+    if (!base_solution.feasible ||
+        base_solution.solution.total_cost.first !=
+            -(long long)problem_data->student_count) {
+        free_solution_result(&base_solution.solution);
+        return result;
+    }
+
+    best_max_rank =
+        find_minimum_q_preserving_rank_target(problem_data,
+                                              q_upper_bound,
+                                              exact_lab_counts,
+                                              base_solution.solution.total_cost,
+                                              rank_cost_model);
+    active_groups =
+        build_student_groups(problem_data,
+                             best_max_rank,
+                             STUDENT_GROUP_ACTIVE_RANK);
+    active_group_pointer =
+        active_groups.count < problem_data->student_count ? &active_groups : NULL;
+    result =
+        try_solve_with_minimum_counts(problem_data,
+                                      best_max_rank,
+                                      exact_lab_counts,
+                                      0,
+                                      0,
+                                      NULL,
+                                      rank_cost_model,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      active_group_pointer);
+    free_student_groups(&active_groups);
+    if (result.feasible &&
+        result.solution.total_cost.first !=
+            -(long long)problem_data->student_count) {
+        free_solution_result(&result.solution);
+        result.feasible = 0;
+        result.solution = empty_solution_result();
+    }
+    if (result.feasible &&
+        !rank_cost_matches_target(result.solution.total_cost,
+                                  base_solution.solution.total_cost)) {
+        free_solution_result(&base_solution.solution);
+        free_solution_result(&result.solution);
+        result.feasible = 0;
+        result.solution = empty_solution_result();
+        fail_with_context("average-fill resource target",
+                          "exact-count solve worsened rank target");
+    }
+    free_solution_result(&base_solution.solution);
+    if (result.feasible) {
+        *out_max_rank = (long long)best_max_rank;
+    }
+    return result;
+}
+
+static int fair_exact_counts_feasible_at_q(
+    const ProblemData *problem_data,
+    const IntList *rank_candidates,
+    int q_index,
+    const int *exact_lab_counts,
+    int has_rank_sum_limit,
+    long long rank_sum_limit,
+    StudentGroupCache *group_cache)
+{
+    OptionalSolutionResult candidate_solution;
+    const StudentGroups *active_group_pointer =
+        student_group_cache_get(group_cache,
+                                problem_data,
+                                rank_candidates,
+                                q_index);
+    int feasible;
+
+    candidate_solution =
+        try_solve_with_minimum_counts(problem_data,
+                                      rank_candidates->items[q_index],
+                                      exact_lab_counts,
+                                      0,
+                                      0,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      active_group_pointer);
+    feasible =
+        candidate_solution.feasible &&
+        candidate_solution.solution.total_cost.first ==
+            -(long long)problem_data->student_count &&
+        (!has_rank_sum_limit ||
+         candidate_solution.solution.total_cost.second <= rank_sum_limit);
+    free_solution_result(&candidate_solution.solution);
+    return feasible;
+}
+
+static OptionalSolutionResult solve_fair_for_exact_counts(
+    const ProblemData *problem_data,
+    int q_upper_bound,
+    const int *exact_lab_counts,
+    long long *out_max_rank)
+{
+    OptionalSolutionResult result;
+    IntList candidates = build_rank_threshold_candidates(problem_data);
+    StudentGroupCache group_cache =
+        student_group_cache_create(candidates.size, STUDENT_GROUP_ACTIVE_RANK);
+    int low_index = int_list_first_index_at_least(&candidates, 1);
+    int high_index = int_list_last_index_at_most(&candidates, q_upper_bound);
+    int answer_index;
+    int best_max_rank;
+    long long rank_sum_limit = 0LL;
+    int has_rank_sum_limit =
+        target_rank_sum_limit(problem_data, &rank_sum_limit);
+    StudentGroups active_groups;
+    const StudentGroups *active_group_pointer;
+
+    result.feasible = 0;
+    result.solution = empty_solution_result();
+
+    if (low_index > high_index ||
+        !fair_exact_counts_feasible_at_q(problem_data,
+                                         &candidates,
+                                         high_index,
+                                         exact_lab_counts,
+                                         has_rank_sum_limit,
+                                         rank_sum_limit,
+                                         &group_cache)) {
+        student_group_cache_free(&group_cache);
+        int_list_free(&candidates);
+        return result;
+    }
+
+    answer_index = high_index;
+    while (low_index <= high_index) {
+        int middle_index = low_index + (high_index - low_index) / 2;
+        if (fair_exact_counts_feasible_at_q(problem_data,
+                                            &candidates,
+                                            middle_index,
+                                            exact_lab_counts,
+                                            has_rank_sum_limit,
+                                            rank_sum_limit,
+                                            &group_cache)) {
+            answer_index = middle_index;
+            high_index = middle_index - 1;
+        } else {
+            low_index = middle_index + 1;
+        }
+    }
+
+    best_max_rank = candidates.items[answer_index];
+    student_group_cache_free(&group_cache);
+    int_list_free(&candidates);
+
+    active_groups =
+        build_student_groups(problem_data,
+                             best_max_rank,
+                             STUDENT_GROUP_ACTIVE_RANK);
+    active_group_pointer =
+        active_groups.count < problem_data->student_count ? &active_groups : NULL;
+    result =
+        try_solve_with_minimum_counts(problem_data,
+                                      best_max_rank,
+                                      exact_lab_counts,
+                                      0,
+                                      0,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      active_group_pointer);
+    free_student_groups(&active_groups);
+    if (result.feasible &&
+        (result.solution.total_cost.first !=
+             -(long long)problem_data->student_count ||
+         (has_rank_sum_limit &&
+          result.solution.total_cost.second > rank_sum_limit))) {
+        free_solution_result(&result.solution);
+        result.feasible = 0;
+        result.solution = empty_solution_result();
+    }
+    if (result.feasible) {
+        *out_max_rank = (long long)best_max_rank;
+    }
+    return result;
+}
+
+static void average_fill_resource_search_consider_current(
+    AverageFillResourceSearch *search)
+{
+    long long average_resource =
+        average_fill_resource_for_counts(search->problem_data,
+                                         search->resource_context,
+                                         search->current_counts);
+    long long candidate_max_rank = 0LL;
+    long long rank_sum_limit;
+    RatioValue minimum_fill;
+    OptionalSolutionResult candidate_solution;
+
+    search->vectors_tested++;
+    if (active_profile != NULL) {
+        active_profile->average_fill_resource_vectors_tested++;
+    }
+    if (search->vectors_tested > AVERAGE_FILL_RESOURCE_VECTOR_LIMIT) {
+        search->limit_hit = 1;
+        if (active_profile != NULL) {
+            active_profile->average_fill_resource_vector_limit_hits++;
+        }
+        return;
+    }
+    if (average_resource < search->resource_context->target_resource) {
+        return;
+    }
+
+    if (search->max_rank_first) {
+        candidate_solution =
+            solve_fair_for_exact_counts(search->problem_data,
+                                        search->q_upper_bound,
+                                        search->current_counts,
+                                        &candidate_max_rank);
+    } else {
+        candidate_solution =
+            solve_rank_first_for_exact_counts(search->problem_data,
+                                              search->q_upper_bound,
+                                              search->current_counts,
+                                              search->rank_cost_model,
+                                              &candidate_max_rank);
+    }
+    if (!candidate_solution.feasible) {
+        return;
+    }
+    if (target_rank_sum_limit(search->problem_data, &rank_sum_limit) &&
+        candidate_solution.solution.total_cost.second > rank_sum_limit) {
+        free_solution_result(&candidate_solution.solution);
+        return;
+    }
+
+    minimum_fill =
+        minimum_fill_ratio_for_counts(search->problem_data,
+                                      search->current_counts);
+    if (!search->best_is_set ||
+        bounded_resource_candidate_better(
+            search->max_rank_first,
+            search->fill_tie_order,
+            &candidate_solution.solution,
+            candidate_max_rank,
+            average_resource,
+            minimum_fill,
+            &search->best_solution,
+            search->best_max_rank,
+            search->best_average_resource,
+            search->best_minimum_fill)) {
+        free_solution_result(&search->best_solution);
+        search->best_solution = candidate_solution.solution;
+        candidate_solution.solution = empty_solution_result();
+        search->best_max_rank = candidate_max_rank;
+        search->best_average_resource = average_resource;
+        search->best_minimum_fill = minimum_fill;
+        search->best_is_set = 1;
+    }
+    free_solution_result(&candidate_solution.solution);
+}
+
+static void average_fill_resource_search_dfs(AverageFillResourceSearch *search,
+                                             int lab_index,
+                                             int remaining_students)
+{
+    int minimum_take;
+    int maximum_take;
+    int take_count;
+    if (search->limit_hit) {
+        return;
+    }
+    if (lab_index == search->problem_data->lab_count) {
+        if (remaining_students == 0) {
+            average_fill_resource_search_consider_current(search);
+        }
+        return;
+    }
+    minimum_take = search->lower_counts[lab_index];
+    if (minimum_take <
+        remaining_students - search->suffix_max_counts[lab_index + 1]) {
+        minimum_take =
+            remaining_students - search->suffix_max_counts[lab_index + 1];
+    }
+    maximum_take = search->problem_data->labs[lab_index].graph_capacity;
+    if (maximum_take >
+        remaining_students - search->suffix_min_counts[lab_index + 1]) {
+        maximum_take =
+            remaining_students - search->suffix_min_counts[lab_index + 1];
+    }
+    if (minimum_take > maximum_take) {
+        return;
+    }
+    for (take_count = minimum_take;
+         take_count <= maximum_take;
+         take_count++) {
+        search->current_counts[lab_index] = take_count;
+        average_fill_resource_search_dfs(search,
+                                         lab_index + 1,
+                                         remaining_students - take_count);
+        if (search->limit_hit) {
+            return;
+        }
+    }
+    search->current_counts[lab_index] = 0;
+}
+
+static int *solve_average_resource_bounded_problem(
+    const ProblemData *problem_data,
+    int q_upper_bound,
+    FillTieOrder fill_tie_order,
+    const RankCostModel *rank_cost_model,
+    int max_rank_first)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    AverageFillResourceContext resource_context;
+    AverageFillResourceSearch search;
+    int lab_index;
+    int *assignment;
+
+    if (targets == NULL || !targets->has_average_fill_min) {
+        return solve_rank_first_problem(problem_data,
+                                        q_upper_bound,
+                                        fill_tie_order,
+                                        rank_cost_model);
+    }
+    if (average_fill_target_has_passive_support(problem_data,
+                                                targets->average_fill_min)) {
+        return solve_rank_first_problem(problem_data,
+                                        q_upper_bound,
+                                        fill_tie_order,
+                                        rank_cost_model);
+    }
+
+    resource_context =
+        average_fill_resource_context_create(problem_data,
+                                             targets->average_fill_min);
+    if (!resource_context.available) {
+        fail_with_context("target constraints",
+                          "average_fill_rate hard target resource scaling is too large for the bounded exact engine");
+    }
+
+    memset(&search, 0, sizeof(search));
+    search.problem_data = problem_data;
+    search.q_upper_bound = target_rank_upper_bound(problem_data, q_upper_bound);
+    search.fill_tie_order = fill_tie_order;
+    search.max_rank_first = max_rank_first;
+    search.rank_cost_model = rank_cost_model;
+    search.resource_context = &resource_context;
+    search.lower_counts = build_base_minimum_counts(problem_data);
+    search.suffix_min_counts =
+        checked_calloc((size_t)problem_data->lab_count + 1U, sizeof(int));
+    search.suffix_max_counts =
+        checked_calloc((size_t)problem_data->lab_count + 1U, sizeof(int));
+    search.current_counts =
+        checked_calloc((size_t)problem_data->lab_count, sizeof(int));
+    search.best_solution = empty_solution_result();
+    search.best_minimum_fill.numerator = 0LL;
+    search.best_minimum_fill.denominator = 1LL;
+
+    if (search.q_upper_bound < 1) {
+        fail_with_context("target constraints",
+                          "No feasible solution: max-rank target leaves no allowable rank");
+    }
+
+    for (lab_index = problem_data->lab_count - 1;
+         lab_index >= 0;
+         lab_index--) {
+        search.suffix_min_counts[lab_index] =
+            search.suffix_min_counts[lab_index + 1] +
+            search.lower_counts[lab_index];
+        search.suffix_max_counts[lab_index] =
+            search.suffix_max_counts[lab_index + 1] +
+            problem_data->labs[lab_index].graph_capacity;
+    }
+    if (search.suffix_min_counts[0] > problem_data->student_count ||
+        search.suffix_max_counts[0] < problem_data->student_count) {
+        free(search.lower_counts);
+        free(search.suffix_min_counts);
+        free(search.suffix_max_counts);
+        free(search.current_counts);
+        average_fill_resource_context_free(&resource_context);
+        fail_with_context("target constraints",
+                          "No feasible solution: capacity bounds cannot place every student");
+    }
+
+    average_fill_resource_search_dfs(&search,
+                                     0,
+                                     problem_data->student_count);
+    if (search.limit_hit) {
+        free_solution_result(&search.best_solution);
+        free(search.lower_counts);
+        free(search.suffix_min_counts);
+        free(search.suffix_max_counts);
+        free(search.current_counts);
+        average_fill_resource_context_free(&resource_context);
+        fail_with_context("target constraints",
+                          "average_fill_rate bounded-resource engine exceeded its exact count-vector limit");
+    }
+    if (!search.best_is_set || search.best_solution.assignment == NULL) {
+        free_solution_result(&search.best_solution);
+        free(search.lower_counts);
+        free(search.suffix_min_counts);
+        free(search.suffix_max_counts);
+        free(search.current_counts);
+        average_fill_resource_context_free(&resource_context);
+        fail_with_context("target constraints",
+                          "No feasible solution: no assignment satisfies the average-fill hard target");
+    }
+
+    assignment = search.best_solution.assignment;
+    search.best_solution.assignment = NULL;
+    free_solution_result(&search.best_solution);
+    free(search.lower_counts);
+    free(search.suffix_min_counts);
+    free(search.suffix_max_counts);
+    free(search.current_counts);
+    average_fill_resource_context_free(&resource_context);
+    return assignment;
+}
+
+static int *solve_rank_first_average_resource_bounded_problem(
+    const ProblemData *problem_data,
+    int q_upper_bound,
+    FillTieOrder fill_tie_order,
+    const RankCostModel *rank_cost_model)
+{
+    return solve_average_resource_bounded_problem(problem_data,
+                                                  q_upper_bound,
+                                                  fill_tie_order,
+                                                  rank_cost_model,
+                                                  0);
+}
+
+static int *solve_fair_average_resource_bounded_problem(
+    const ProblemData *problem_data,
+    int q_upper_bound)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    if (targets == NULL || !targets->has_average_fill_min ||
+        average_fill_target_has_passive_support(problem_data,
+                                                targets->average_fill_min)) {
+        int best_max_rank = find_fair_max_rank_satisfying_rank_sum_targets(
+            problem_data);
+        if (best_max_rank > q_upper_bound) {
+            fail_with_context("target constraints",
+                              "No feasible solution: no fair solution satisfies the guarded max-rank bound");
+        }
+        return solve_problem(problem_data, best_max_rank);
+    }
+    return solve_average_resource_bounded_problem(problem_data,
+                                                  q_upper_bound,
+                                                  FILL_TIE_MINIMUM_THEN_AVERAGE,
+                                                  NULL,
+                                                  1);
+}
+
+static int average_fill_target_needs_bounded_resource(
+    const ProblemData *problem_data)
+{
+    const TargetConstraints *targets = problem_data->targets;
+    return targets != NULL &&
+           targets->has_average_fill_min &&
+           !average_fill_target_has_passive_support(problem_data,
+                                                    targets->average_fill_min);
 }
 
 static int rank_sum_target_is_feasible_at_q(const ProblemData *problem_data,
@@ -10306,42 +11085,58 @@ static int *solve_assignment_for_mode(const ProblemData *problem_data,
         return solve_weighted_exact_problem(problem_data, &weights);
     }
     if (objective_mode == OBJECTIVE_FAIR) {
-        int best_max_rank =
-            find_fair_max_rank_satisfying_rank_sum_targets(problem_data);
-        return solve_problem(problem_data, best_max_rank);
+        return solve_fair_average_resource_bounded_problem(
+            problem_data,
+            problem_data->lab_count + 1);
     }
     if (objective_mode == OBJECTIVE_SATISFACTION) {
-        return solve_rank_first_problem(problem_data,
-                                        problem_data->lab_count + 1,
-                                        FILL_TIE_AVERAGE_THEN_MINIMUM,
-                                        &options->rank_cost_model);
+        return solve_rank_first_average_resource_bounded_problem(
+            problem_data,
+            problem_data->lab_count + 1,
+            FILL_TIE_AVERAGE_THEN_MINIMUM,
+            &options->rank_cost_model);
     }
     if (objective_mode == OBJECTIVE_BALANCED) {
-        return solve_rank_first_problem(problem_data,
-                                        problem_data->lab_count + 1,
-                                        FILL_TIE_MINIMUM_THEN_AVERAGE,
-                                        NULL);
+        return solve_rank_first_average_resource_bounded_problem(
+            problem_data,
+            problem_data->lab_count + 1,
+            FILL_TIE_MINIMUM_THEN_AVERAGE,
+            NULL);
     }
     if (objective_mode == OBJECTIVE_GUARDED) {
-        int minimum_max_rank =
-            find_fair_max_rank_satisfying_rank_sum_targets(problem_data);
-        int guarded_max_rank = minimum_max_rank + options->max_rank_slack;
+        int minimum_max_rank;
+        int guarded_max_rank;
+        if (average_fill_target_needs_bounded_resource(problem_data)) {
+            int *fair_assignment =
+                solve_fair_average_resource_bounded_problem(
+                    problem_data,
+                    problem_data->lab_count + 1);
+            minimum_max_rank =
+                (int)max_rank_for_solution(problem_data, fair_assignment);
+            free(fair_assignment);
+        } else {
+            minimum_max_rank =
+                find_fair_max_rank_satisfying_rank_sum_targets(problem_data);
+        }
+        guarded_max_rank = minimum_max_rank + options->max_rank_slack;
         if (guarded_max_rank < minimum_max_rank ||
             guarded_max_rank > problem_data->lab_count + 1) {
             guarded_max_rank = problem_data->lab_count + 1;
         }
-        return solve_rank_first_problem(problem_data,
-                                        guarded_max_rank,
-                                        FILL_TIE_AVERAGE_THEN_MINIMUM,
-                                        NULL);
+        return solve_rank_first_average_resource_bounded_problem(
+            problem_data,
+            guarded_max_rank,
+            FILL_TIE_AVERAGE_THEN_MINIMUM,
+            NULL);
     }
     if (objective_mode == OBJECTIVE_FILL_CONVEX) {
         return solve_convex_fill_problem(problem_data);
     }
-    return solve_rank_first_problem(problem_data,
-                                    problem_data->lab_count + 1,
-                                    FILL_TIE_AVERAGE_THEN_MINIMUM,
-                                    NULL);
+    return solve_rank_first_average_resource_bounded_problem(
+        problem_data,
+        problem_data->lab_count + 1,
+        FILL_TIE_AVERAGE_THEN_MINIMUM,
+        NULL);
 }
 
 static EvaluationMetrics compute_evaluation_metrics(const ProblemData *problem_data,
@@ -12408,6 +13203,14 @@ static void solver_profile_add_child_profile(SolverProfile *profile,
         read_profile_long_long_or_zero(profile_path, "radix_heap_used");
     profile->radix_heap_fallbacks +=
         read_profile_long_long_or_zero(profile_path, "radix_heap_fallbacks");
+    profile->average_fill_resource_vectors_tested +=
+        read_profile_long_long_or_zero(
+            profile_path,
+            "average_fill_resource_vectors_tested");
+    profile->average_fill_resource_vector_limit_hits +=
+        read_profile_long_long_or_zero(
+            profile_path,
+            "average_fill_resource_vector_limit_hits");
     profile->weighted_bound_prunes +=
         read_profile_long_long_or_zero(profile_path, "weighted_bound_prunes");
     profile->weighted_corner_cache_hits +=
@@ -12788,6 +13591,12 @@ static void solver_profile_write(const char *profile_path,
         fprintf(profile_file,
                 "radix_heap_fallbacks\t%lld\n",
                 profile->radix_heap_fallbacks) < 0 ||
+        fprintf(profile_file,
+                "average_fill_resource_vectors_tested\t%lld\n",
+                profile->average_fill_resource_vectors_tested) < 0 ||
+        fprintf(profile_file,
+                "average_fill_resource_vector_limit_hits\t%lld\n",
+                profile->average_fill_resource_vector_limit_hits) < 0 ||
         fprintf(profile_file,
                 "weighted_bound_prunes\t%lld\n",
                 profile->weighted_bound_prunes) < 0 ||
@@ -14172,7 +14981,7 @@ int main(int argc, char **argv)
         constraints_are_loaded = 1;
     }
     finalize_problem_capacities(&problem_data);
-    validate_target_constraints_against_problem(&problem_data);
+    validate_target_constraints_against_problem(&problem_data, &options);
     precheck_structural_target_constraints(&problem_data);
     if (options.base_assignment_path != NULL) {
         base_assignment =

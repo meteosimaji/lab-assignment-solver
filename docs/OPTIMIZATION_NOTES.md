@@ -53,10 +53,14 @@ safety conditions are not met.
 - Weighted-exact average-fill scalar safety checks use the active rank upper
   bound (`q_end`) when hard targets forbid larger ranks, avoiding overflow
   fallbacks caused by assignment edges that cannot appear in any searched box.
-- Average-fill hard targets are accepted for exact bounded cases: when current
-  minimum-count constraints imply the target, or when average fill is constant
-  over complete assignments.  Other average-fill resource constraints still
-  reject explicitly instead of using a heuristic side constraint.
+- Average-fill hard targets now use an exact bounded count-vector engine for
+  supported single objectives.  The engine first handles passive cases where
+  the target is implied by lower bounds or average fill is constant.  Otherwise
+  it scales the rational average-fill expression to an integer resource,
+  enumerates laboratory count vectors that satisfy the resource bound, and
+  solves each count slice exactly with min-cost flow.  The count-vector limit
+  is a safety guard: when it is exceeded, the solver rejects the run rather
+  than silently switching to a heuristic.
 - Initial min-cost-flow potentials use layered DAG relaxation on fresh
   assignment graphs and fall back to the previous queue method if the graph is
   not in layer order.
@@ -130,6 +134,9 @@ unsafe.
   for repeated ungrouped min-cost-flow solves.
 - `radix_heap_attempts`, `radix_heap_used`, and `radix_heap_fallbacks`:
   checked scalar Dijkstra queue usage.
+- `average_fill_resource_vectors_tested` and
+  `average_fill_resource_vector_limit_hits`: bounded exact count-vector
+  enumeration for nontrivial average-fill hard targets.
 - `mcf_edges_added`: opportunity for fuller graph templates or sparse arcs.
 - `min_cost_flow_calls`: opportunity for repeated-solve reduction.
 - `dinic_calls`: opportunity for improved threshold feasibility checks.

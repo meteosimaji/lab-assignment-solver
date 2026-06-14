@@ -318,6 +318,19 @@ def exact_best_objective_by_key(capacities, ranks, key_function):
     return best[1]
 
 
+def exact_best_objective_by_key_with_filter(capacities, ranks, key_function, predicate):
+    best = None
+    for assignment_indices in product(range(len(capacities)), repeat=len(ranks)):
+        objective = exact_objective_for_assignment(capacities, ranks, assignment_indices)
+        if objective is None or not predicate(objective):
+            continue
+        comparable = key_function(objective)
+        if best is None or comparable < best[0]:
+            best = (comparable, objective)
+    assert best is not None
+    return best[1]
+
+
 def rubric_key(objective):
     max_rank, rank_sum, rank_square_sum, minimum_fill, average_fill = objective
     return (rank_sum, rank_square_sum, max_rank, -average_fill, -minimum_fill)
@@ -382,6 +395,25 @@ def exact_best_guarded_objective(capacities, ranks, slack):
             0 if objective[0] <= max_allowed_rank else 1,
             *rubric_key(objective),
         ),
+    )
+
+
+def exact_best_guarded_objective_with_filter(capacities, ranks, slack, predicate):
+    fair_objective = exact_best_objective_by_key_with_filter(
+        capacities,
+        ranks,
+        lambda objective: objective[:3] + (-objective[3], -objective[4]),
+        predicate,
+    )
+    max_allowed_rank = fair_objective[0] + slack
+    return exact_best_objective_by_key_with_filter(
+        capacities,
+        ranks,
+        lambda objective: (
+            0 if objective[0] <= max_allowed_rank else 1,
+            *rubric_key(objective),
+        ),
+        predicate,
     )
 
 
@@ -2544,7 +2576,7 @@ B 4
     }
 
 
-def test_require_average_fill_hard_target_rejects_unsupported_resource_case(tmp_path):
+def test_require_average_fill_hard_target_uses_bounded_resource_engine(tmp_path):
     lab_text = """\
 2
 A 2
@@ -2564,10 +2596,186 @@ B 4
         extra_args=[
             "--require-average-fill-at-least",
             "75%",
+            "--profile",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    metrics = read_metrics(output_path)
+    profile = read_profile(output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert float(metrics["average_fill_rate"]) >= 0.75
+    assert {row["target"]: row["status"] for row in rows} == {
+        "average_fill_rate": "pass",
+    }
+    assert int(profile["average_fill_resource_vectors_tested"]) > 0
+
+
+def test_require_average_fill_hard_target_works_with_fair_objective(tmp_path):
+    lab_text = """\
+2
+A 2
+B 4
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 B A
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "fair",
+            "--require-average-fill-at-least",
+            "75%",
+            "--profile",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    metrics = read_metrics(output_path)
+    profile = read_profile(output_path)
+    rows = read_tsv(target_status_path_for(output_path))
+    assert float(metrics["average_fill_rate"]) >= 0.75
+    assert {row["target"]: row["status"] for row in rows} == {
+        "average_fill_rate": "pass",
+    }
+    assert int(profile["average_fill_resource_vectors_tested"]) > 0
+
+
+def test_require_average_fill_hard_target_works_with_guarded_objective(tmp_path):
+    lab_text = """\
+2
+A 2
+B 4
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 B A
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "guarded",
+            "--max-rank-slack",
+            "1",
+            "--require-average-fill-at-least",
+            "75%",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+    validate_assignment(lab_text, preference_text, output_path)
+    metrics = read_metrics(output_path)
+    assert float(metrics["average_fill_rate"]) >= 0.75
+
+
+def test_average_fill_hard_target_matches_bruteforce_for_supported_objectives(tmp_path):
+    lab_text = """\
+3
+A 2
+B 3
+C 4
+"""
+    preference_text = """\
+5 3
+00001 A B C
+00002 A C B
+00003 B C A
+00004 C B A
+00005 C A B
+"""
+    labs, capacities, student_ids, ranks = parse_instance(lab_text, preference_text)
+    target = Fraction(3, 5)
+    predicate = lambda objective: objective[4] >= target
+    cases = [
+        (
+            ["--objective", "rubric"],
+            exact_best_objective_by_key_with_filter(
+                capacities,
+                ranks,
+                rubric_key,
+                predicate,
+            ),
+        ),
+        (
+            ["--objective", "fair"],
+            exact_best_objective_by_key_with_filter(
+                capacities,
+                ranks,
+                lambda objective: objective[:3] + (-objective[3], -objective[4]),
+                predicate,
+            ),
+        ),
+        (
+            ["--objective", "guarded", "--max-rank-slack", "1"],
+            exact_best_guarded_objective_with_filter(
+                capacities,
+                ranks,
+                1,
+                predicate,
+            ),
+        ),
+    ]
+    for index, (extra_args, expected) in enumerate(cases):
+        completed, output_path = run_solver(
+            tmp_path / f"average_fill_target_{index}",
+            lab_text,
+            preference_text,
+            extra_args=[
+                *extra_args,
+                "--require-average-fill-at-least",
+                "60%",
+            ],
+        )
+        assert completed.returncode == 0, completed.stderr
+        assignments = validate_assignment(lab_text, preference_text, output_path)
+        actual = objective_from_solver_output(
+            labs,
+            capacities,
+            student_ids,
+            ranks,
+            assignments,
+        )
+        assert actual == expected
+
+
+def test_require_average_fill_hard_target_rejects_unsupported_objective(tmp_path):
+    lab_text = """\
+2
+A 2
+B 4
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A B
+00003 B A
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=[
+            "--objective",
+            "weighted-exact",
+            "--require-average-fill-at-least",
+            "75%",
         ],
     )
     assert completed.returncode != 0
-    assert "average_fill_rate hard targets need a bounded exact resource case" in completed.stderr
+    assert "average_fill_rate hard targets need a supported bounded-resource objective" in completed.stderr
     assert not output_path.exists()
 
 
