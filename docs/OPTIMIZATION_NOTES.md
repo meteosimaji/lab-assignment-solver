@@ -65,6 +65,11 @@ safety conditions are not met.
   stores only active student-laboratory arcs and adjacency reservation counts;
   costs, residual capacities, reverse edges, and lower-bound sink edges are
   rebuilt for every solve.
+- Ordinary min-cost-flow Dijkstra uses a radix heap when the current reduced
+  residual graph can be encoded as a monotone unsigned scalar key.  The runtime
+  check requires nonnegative reduced tuple components and overflow-checked
+  scales that preserve lexicographic `(first, second, third)` order for every
+  simple path.  Otherwise it falls back to the binary heap.
 - Weighted-exact can seed its incumbent with additional light exact objectives
   on larger threshold grids.  These seeds are upper bounds for pruning only;
   the final solution is still certified by branch-and-bound.
@@ -78,20 +83,18 @@ safety conditions are not met.
 
 ## Scalar Shortest-Path Queue Roadmap
 
-Dial heaps are useful only for small bounded nonnegative integer reduced costs.
-They should not be connected directly to tuple costs or BigUInt exact average
-comparison.
+Radix heaps are now enabled for ordinary min-cost-flow Dijkstra only after a
+per-augmentation reduced-cost scan proves that tuple costs can be mapped to
+monotone unsigned keys.  Dial heaps are still useful only for small bounded
+nonnegative integer reduced costs.  They should not be connected directly to
+tuple costs or BigUInt exact average comparison.
 
-Planned safe order:
+Remaining safe order:
 
 1. Preserve the existing exact comparator as the fallback.
-2. Add overflow-checked scalarization only when it preserves lexicographic
-   ordering.
-3. Run the scalarized min-cost-flow path with the current heap and compare
-   objective values against the existing path.
-4. Use a radix heap for general monotone unsigned Dijkstra keys only after
-   tuple costs are safely scalarized.
-5. Use a Dial bucket queue only when the maximum reduced edge cost is small.
+2. Keep radix heap limited to checked scalarized ordinary min-cost-flow keys.
+3. Extend scalar-key caching if the reduced-cost scan becomes a bottleneck.
+4. Use a Dial bucket queue only when the maximum reduced edge cost is small.
 
 This is a performance optimization only.  It must not change the mathematical
 objective or replace the BigUInt exact-average path when scalarization is
@@ -125,6 +128,8 @@ unsafe.
 - `student_group_builds`: opportunity for group cache or sparse signatures.
 - `active_arc_template_hits` and `active_arc_template_misses`: topology reuse
   for repeated ungrouped min-cost-flow solves.
+- `radix_heap_attempts`, `radix_heap_used`, and `radix_heap_fallbacks`:
+  checked scalar Dijkstra queue usage.
 - `mcf_edges_added`: opportunity for fuller graph templates or sparse arcs.
 - `min_cost_flow_calls`: opportunity for repeated-solve reduction.
 - `dinic_calls`: opportunity for improved threshold feasibility checks.

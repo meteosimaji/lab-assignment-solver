@@ -147,6 +147,9 @@ FIELDNAMES = [
     "ordinary_average_scalar_fallback_overflow",
     "active_arc_template_hits",
     "active_arc_template_misses",
+    "radix_heap_attempts",
+    "radix_heap_used",
+    "radix_heap_fallbacks",
 ]
 
 
@@ -316,6 +319,9 @@ def run_case_once(case, repeat_index, binary, bench_dir):
         ),
         "active_arc_template_hits": profile.get("active_arc_template_hits", ""),
         "active_arc_template_misses": profile.get("active_arc_template_misses", ""),
+        "radix_heap_attempts": profile.get("radix_heap_attempts", ""),
+        "radix_heap_used": profile.get("radix_heap_used", ""),
+        "radix_heap_fallbacks": profile.get("radix_heap_fallbacks", ""),
     }
 
 

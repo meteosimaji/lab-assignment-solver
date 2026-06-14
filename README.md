@@ -291,7 +291,8 @@ are:
 - `profile.tsv`: graph/flow call counters, threshold candidate counts,
   `exact_path_cost_comparisons`, `biguint_score_comparisons`,
   `ordinary_average_scalar_used`, `active_arc_template_hits`,
-  `active_arc_template_misses`,
+  `active_arc_template_misses`, `radix_heap_used`,
+  `radix_heap_fallbacks`,
   branch-and-bound counters, and phase CPU timings.  The legacy
   `weighted_score_comparisons` key is still written as an alias for
   `exact_path_cost_comparisons`.
@@ -785,6 +786,15 @@ costs, residual capacities, reverse edges, and laboratory lower-bound edges are
 rebuilt for every solve, so the optimization cannot carry residual state across
 objectives or threshold checks.  `--profile` reports
 `active_arc_template_hits` and `active_arc_template_misses`.
+
+The ordinary min-cost-flow Dijkstra queue uses a radix heap only when the
+current reduced residual costs can be encoded as a monotone unsigned integer
+key without changing the lexicographic order of `(first, second, third)` cost
+tuples.  The check requires nonnegative reduced components and overflow-checked
+scales large enough for every simple path in the current residual graph.  If
+the check fails, the solver immediately uses the existing binary heap.  Profile
+counters `radix_heap_attempts`, `radix_heap_used`, and
+`radix_heap_fallbacks` show which path was taken.
 
 ## Reproducible Verification
 

@@ -1085,6 +1085,23 @@ average-fill value while searching the minimum-fill threshold, as described
 above.  Finally, the count vector is
 expanded back to the student-wise output format.
 
+Tenth, the ordinary min-cost-flow Dijkstra queue uses a radix heap only when
+the current residual graph admits an exact unsigned scalar key.  Before each
+augmentation, the solver scans positive-residual edges and computes their
+reduced costs.  The radix path is enabled only if every reduced component
+\((c_1,c_2,c_3)\) is componentwise nonnegative and if checked scales \(B_2\)
+and \(B_1\) fit such that
+\[
+  K(c)=c_1B_1+c_2B_2+c_3
+\]
+preserves lexicographic order for every simple path in the current residual
+graph.  A one-unit difference in \(c_2\) is larger than the largest possible
+\(c_3\) path difference, and a one-unit difference in \(c_1\) is larger than
+the largest possible lower-component path difference.  Thus Dijkstra's
+settled distances have monotone unsigned integer keys, satisfying the radix
+heap invariant.  If any sign or overflow check fails, the previous binary heap
+is used without changing the path costs.
+
 \section{Complexity}
 
 Let \(E\) be the number of forward edges in the final min-cost flow network.

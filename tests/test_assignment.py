@@ -1567,6 +1567,35 @@ C 2
     assert int(profile["active_arc_template_misses"]) > 0
 
 
+def test_profile_reports_radix_heap_usage(tmp_path):
+    lab_text = """\
+3
+A 2
+B 2
+C 2
+"""
+    preference_text = """\
+4 2
+00001 A B
+00002 A C
+00003 B C
+00004 B A
+"""
+    completed, output_path = run_solver(
+        tmp_path,
+        lab_text,
+        preference_text,
+        extra_args=["--objective", "fair", "--profile"],
+    )
+    assert completed.returncode == 0, completed.stderr
+    profile = read_profile(output_path)
+    assert "radix_heap_attempts" in profile
+    assert "radix_heap_used" in profile
+    assert "radix_heap_fallbacks" in profile
+    assert int(profile["radix_heap_attempts"]) > 0
+    assert int(profile["radix_heap_used"]) > 0
+
+
 def test_ordinary_average_scalar_fast_path_is_used(tmp_path):
     lab_text = """\
 3

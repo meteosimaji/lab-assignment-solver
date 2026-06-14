@@ -28,6 +28,7 @@
 #define MAX_CONFIG_WEIGHT 1000000000LL
 #define PRINT_RANK_COST_SAMPLE_LIMIT 8
 #define AVERAGE_FILL_LINEAR_PROBE_LIMIT 8
+#define RADIX_HEAP_SCAN_EDGE_LIMIT 200000
 #define WEIGHTED_SEED_MAX_Q_AXIS 32
 #define WEIGHTED_SEED_MIN_GRID_SIZE 128LL
 #define WEIGHTED_LIGHT_SEED_MIN_GRID_SIZE 32LL
@@ -382,6 +383,9 @@ typedef struct {
     long long ordinary_average_scalar_fallback_not_applicable;
     long long active_arc_template_hits;
     long long active_arc_template_misses;
+    long long radix_heap_attempts;
+    long long radix_heap_used;
+    long long radix_heap_fallbacks;
     long long weighted_bound_prunes;
     long long weighted_corner_cache_hits;
     long long weighted_corner_cache_misses;
@@ -562,6 +566,30 @@ typedef struct {
     int size;
     int capacity;
 } MinHeap;
+
+typedef struct {
+    unsigned long long key;
+    int node;
+} RadixHeapItem;
+
+typedef struct {
+    RadixHeapItem *items;
+    int size;
+    int capacity;
+} RadixHeapBucket;
+
+typedef struct {
+    RadixHeapBucket buckets[65];
+    unsigned long long last_key;
+    int size;
+} RadixHeap;
+
+typedef struct {
+    int available;
+    unsigned long long first_scale;
+    unsigned long long second_scale;
+    unsigned long long third_scale;
+} RadixCostContext;
 
 static const char *cleanup_output_path = NULL;
 static char *cleanup_metrics_output_path = NULL;
@@ -4362,6 +4390,325 @@ static void heap_free(MinHeap *heap)
     free(heap->positions);
 }
 
+static int u64_add_fits(unsigned long long left,
+                        unsigned long long right,
+                        unsigned long long limit,
+                        unsigned long long *out_value)
+{
+    if (left > limit || right > limit - left) {
+        return 0;
+    }
+    *out_value = left + right;
+    return 1;
+}
+
+static int u64_multiply_fits(unsigned long long left,
+                             unsigned long long right,
+                             unsigned long long limit,
+                             unsigned long long *out_value)
+{
+    if (left != 0ULL && right > limit / left) {
+        return 0;
+    }
+    *out_value = left * right;
+    return 1;
+}
+
+static int radix_bucket_index(unsigned long long key,
+                              unsigned long long last_key)
+{
+    unsigned long long difference = key ^ last_key;
+    int index = 0;
+    while (difference != 0ULL) {
+        index++;
+        difference >>= 1U;
+    }
+    return index;
+}
+
+static void radix_heap_bucket_push(RadixHeapBucket *bucket,
+                                   RadixHeapItem item)
+{
+    if (bucket->size == bucket->capacity) {
+        int new_capacity = bucket->capacity == 0 ? 8 : bucket->capacity * 2;
+        if (new_capacity < bucket->capacity) {
+            fail_with_context("radix heap", "capacity overflow");
+        }
+        bucket->items =
+            checked_realloc(bucket->items,
+                            (size_t)new_capacity * sizeof(RadixHeapItem));
+        bucket->capacity = new_capacity;
+    }
+    bucket->items[bucket->size] = item;
+    bucket->size++;
+}
+
+static void radix_heap_init(RadixHeap *heap)
+{
+    int bucket_index_value;
+    heap->last_key = 0ULL;
+    heap->size = 0;
+    for (bucket_index_value = 0;
+         bucket_index_value < 65;
+         bucket_index_value++) {
+        heap->buckets[bucket_index_value].items = NULL;
+        heap->buckets[bucket_index_value].size = 0;
+        heap->buckets[bucket_index_value].capacity = 0;
+    }
+}
+
+static void radix_heap_push(RadixHeap *heap,
+                            unsigned long long key,
+                            int node)
+{
+    RadixHeapItem item;
+    int bucket_index_value;
+    if (key < heap->last_key) {
+        fail_with_context("radix heap", "key order error");
+    }
+    item.key = key;
+    item.node = node;
+    bucket_index_value = radix_bucket_index(key, heap->last_key);
+    radix_heap_bucket_push(&heap->buckets[bucket_index_value], item);
+    heap->size++;
+}
+
+static int radix_heap_pop(RadixHeap *heap, RadixHeapItem *out_item)
+{
+    int bucket_index_value;
+    if (heap->size == 0) {
+        return 0;
+    }
+    if (heap->buckets[0].size == 0) {
+        int source_bucket = -1;
+        unsigned long long new_last_key = ULLONG_MAX;
+        for (bucket_index_value = 1;
+             bucket_index_value < 65;
+             bucket_index_value++) {
+            int item_index;
+            if (heap->buckets[bucket_index_value].size == 0) {
+                continue;
+            }
+            source_bucket = bucket_index_value;
+            for (item_index = 0;
+                 item_index < heap->buckets[bucket_index_value].size;
+                 item_index++) {
+                if (heap->buckets[bucket_index_value].items[item_index].key <
+                    new_last_key) {
+                    new_last_key =
+                        heap->buckets[bucket_index_value].items[item_index].key;
+                }
+            }
+            break;
+        }
+        if (source_bucket < 0) {
+            fail_with_context("radix heap", "empty heap state");
+        }
+        heap->last_key = new_last_key;
+        {
+            RadixHeapBucket old_bucket = heap->buckets[source_bucket];
+            int item_index;
+            heap->buckets[source_bucket].items = NULL;
+            heap->buckets[source_bucket].size = 0;
+            heap->buckets[source_bucket].capacity = 0;
+            for (item_index = 0; item_index < old_bucket.size; item_index++) {
+                RadixHeapItem item = old_bucket.items[item_index];
+                int new_bucket_index =
+                    radix_bucket_index(item.key, heap->last_key);
+                radix_heap_bucket_push(&heap->buckets[new_bucket_index], item);
+            }
+            free(old_bucket.items);
+        }
+    }
+
+    if (heap->buckets[0].size == 0) {
+        fail_with_context("radix heap", "missing minimum bucket");
+    }
+    heap->buckets[0].size--;
+    *out_item = heap->buckets[0].items[heap->buckets[0].size];
+    heap->size--;
+    return 1;
+}
+
+static void radix_heap_free(RadixHeap *heap)
+{
+    int bucket_index_value;
+    for (bucket_index_value = 0;
+         bucket_index_value < 65;
+         bucket_index_value++) {
+        free(heap->buckets[bucket_index_value].items);
+        heap->buckets[bucket_index_value].items = NULL;
+        heap->buckets[bucket_index_value].size = 0;
+        heap->buckets[bucket_index_value].capacity = 0;
+    }
+    heap->size = 0;
+}
+
+static int cost_to_radix_key(Cost value,
+                             const RadixCostContext *context,
+                             unsigned long long *out_key)
+{
+    unsigned long long first_part;
+    unsigned long long second_part;
+    unsigned long long lower_part;
+    if (!context->available ||
+        value.first < 0LL ||
+        value.second < 0LL ||
+        value.third < 0LL) {
+        return 0;
+    }
+    if (!u64_multiply_fits((unsigned long long)value.first,
+                           context->first_scale,
+                           ULLONG_MAX,
+                           &first_part)) {
+        return 0;
+    }
+    if (!u64_multiply_fits((unsigned long long)value.second,
+                           context->second_scale,
+                           ULLONG_MAX,
+                           &second_part)) {
+        return 0;
+    }
+    if (!u64_add_fits(second_part,
+                      (unsigned long long)value.third,
+                      ULLONG_MAX,
+                      &lower_part)) {
+        return 0;
+    }
+    return u64_add_fits(first_part, lower_part, ULLONG_MAX, out_key);
+}
+
+static int try_build_radix_cost_context(const McfGraph *graph,
+                                        const Cost *potential,
+                                        RadixCostContext *context)
+{
+    int from_node;
+    int residual_edge_slots = 0;
+    unsigned long long max_first = 0ULL;
+    unsigned long long max_second = 0ULL;
+    unsigned long long max_third = 0ULL;
+    unsigned long long max_path_first;
+    unsigned long long max_first_key;
+    unsigned long long max_path_third;
+    unsigned long long second_scale;
+    unsigned long long max_path_second;
+    unsigned long long max_second_key;
+    unsigned long long lower_component_range;
+    unsigned long long lower_range_plus_one;
+
+    context->available = 0;
+    context->first_scale = 1ULL;
+    context->second_scale = 1ULL;
+    context->third_scale = 1ULL;
+    if (active_profile != NULL) {
+        active_profile->radix_heap_attempts++;
+    }
+
+    for (from_node = 0; from_node < graph->node_count; from_node++) {
+        if (graph->adjacency[from_node].size >
+            RADIX_HEAP_SCAN_EDGE_LIMIT - residual_edge_slots) {
+            if (active_profile != NULL) {
+                active_profile->radix_heap_fallbacks++;
+            }
+            return 0;
+        }
+        residual_edge_slots += graph->adjacency[from_node].size;
+    }
+    if (residual_edge_slots > RADIX_HEAP_SCAN_EDGE_LIMIT) {
+        if (active_profile != NULL) {
+            active_profile->radix_heap_fallbacks++;
+        }
+        return 0;
+    }
+
+    for (from_node = 0; from_node < graph->node_count; from_node++) {
+        int edge_index;
+        for (edge_index = 0;
+             edge_index < graph->adjacency[from_node].size;
+             edge_index++) {
+            const McfEdge *edge =
+                &graph->adjacency[from_node].items[edge_index];
+            Cost reduced_cost;
+            if (edge->capacity <= 0) {
+                continue;
+            }
+            reduced_cost =
+                cost_subtract(cost_add(edge->cost, potential[from_node]),
+                              potential[edge->to_node]);
+            if (cost_less(reduced_cost, cost_zero()) ||
+                reduced_cost.first < 0LL ||
+                reduced_cost.second < 0LL ||
+                reduced_cost.third < 0LL) {
+                if (active_profile != NULL) {
+                    active_profile->radix_heap_fallbacks++;
+                }
+                return 0;
+            }
+            if ((unsigned long long)reduced_cost.first > max_first) {
+                max_first = (unsigned long long)reduced_cost.first;
+            }
+            if ((unsigned long long)reduced_cost.second > max_second) {
+                max_second = (unsigned long long)reduced_cost.second;
+            }
+            if ((unsigned long long)reduced_cost.third > max_third) {
+                max_third = (unsigned long long)reduced_cost.third;
+            }
+        }
+    }
+
+    if (!u64_multiply_fits(max_third,
+                           (unsigned long long)graph->node_count,
+                           ULLONG_MAX - 1ULL,
+                           &max_path_third) ||
+        !u64_add_fits(max_path_third,
+                      1ULL,
+                      ULLONG_MAX,
+                      &second_scale) ||
+        !u64_multiply_fits(max_second,
+                           (unsigned long long)graph->node_count,
+                           ULLONG_MAX,
+                           &max_path_second) ||
+        !u64_multiply_fits(max_path_second,
+                           second_scale,
+                           ULLONG_MAX,
+                           &max_second_key) ||
+        !u64_add_fits(max_second_key,
+                      max_path_third,
+                      ULLONG_MAX - 1ULL,
+                      &lower_component_range) ||
+        !u64_add_fits(lower_component_range,
+                      1ULL,
+                      ULLONG_MAX,
+                      &lower_range_plus_one) ||
+        !u64_multiply_fits(max_first,
+                           (unsigned long long)graph->node_count,
+                           ULLONG_MAX,
+                           &max_path_first) ||
+        !u64_multiply_fits(max_path_first,
+                           lower_range_plus_one,
+                           ULLONG_MAX,
+                           &max_first_key) ||
+        !u64_add_fits(max_first_key,
+                      lower_component_range,
+                      ULLONG_MAX,
+                      &max_first_key)) {
+        if (active_profile != NULL) {
+            active_profile->radix_heap_fallbacks++;
+        }
+        return 0;
+    }
+    (void)max_second_key;
+    (void)max_first_key;
+    context->available = 1;
+    context->first_scale = lower_range_plus_one;
+    context->second_scale = second_scale;
+    context->third_scale = 1ULL;
+    if (active_profile != NULL) {
+        active_profile->radix_heap_used++;
+    }
+    return 1;
+}
+
 static int compute_initial_potentials_layered(const McfGraph *graph,
                                               int source_node,
                                               Cost *potential)
@@ -4609,6 +4956,7 @@ static MinCostResult min_cost_flow(McfGraph *graph,
     int *settled = checked_malloc((size_t)graph->node_count * sizeof(int));
     MinCostResult result;
     MinHeap heap;
+    int radix_heap_disabled = 0;
     if (active_profile != NULL) {
         active_profile->min_cost_flow_calls++;
     }
@@ -4633,32 +4981,119 @@ static MinCostResult min_cost_flow(McfGraph *graph,
         }
 
         distance[source_node] = cost_zero();
-        heap_push_or_decrease(&heap, cost_zero(), source_node);
-
-        while (heap_pop(&heap, &heap_item)) {
-            int current_node = heap_item.node;
-            int edge_index;
-            if (settled[current_node] ||
-                !cost_equal(heap_item.distance, distance[current_node])) {
-                continue;
-            }
-            settled[current_node] = 1;
-            for (edge_index = 0; edge_index < graph->adjacency[current_node].size; edge_index++) {
-                McfEdge *edge = &graph->adjacency[current_node].items[edge_index];
-                if (edge->capacity > 0 && !settled[edge->to_node]) {
-                    Cost reduced_cost =
-                        cost_subtract(cost_add(edge->cost, potential[current_node]),
-                                      potential[edge->to_node]);
-                    Cost next_distance;
-                    if (cost_less(reduced_cost, cost_zero())) {
-                        fail_with_message("internal min-cost-flow potential error");
+        {
+            RadixCostContext radix_context;
+            if (!radix_heap_disabled &&
+                try_build_radix_cost_context(graph,
+                                             potential,
+                                             &radix_context)) {
+                RadixHeap radix_heap;
+                unsigned long long source_key;
+                if (!cost_to_radix_key(cost_zero(),
+                                       &radix_context,
+                                       &source_key)) {
+                    fail_with_message("internal radix heap source key error");
+                }
+                radix_heap_init(&radix_heap);
+                radix_heap_push(&radix_heap, source_key, source_node);
+                {
+                    RadixHeapItem radix_item;
+                    while (radix_heap_pop(&radix_heap, &radix_item)) {
+                        int current_node = radix_item.node;
+                        int edge_index;
+                        unsigned long long current_key;
+                        if (settled[current_node] ||
+                            !cost_to_radix_key(distance[current_node],
+                                               &radix_context,
+                                               &current_key) ||
+                            radix_item.key != current_key) {
+                            continue;
+                        }
+                        settled[current_node] = 1;
+                        for (edge_index = 0;
+                             edge_index <
+                                 graph->adjacency[current_node].size;
+                             edge_index++) {
+                            McfEdge *edge =
+                                &graph->adjacency[current_node].items[edge_index];
+                            if (edge->capacity > 0 &&
+                                !settled[edge->to_node]) {
+                                Cost reduced_cost =
+                                    cost_subtract(
+                                        cost_add(edge->cost,
+                                                 potential[current_node]),
+                                        potential[edge->to_node]);
+                                Cost next_distance;
+                                unsigned long long next_key;
+                                if (cost_less(reduced_cost, cost_zero())) {
+                                    fail_with_message(
+                                        "internal min-cost-flow potential error");
+                                }
+                                next_distance =
+                                    cost_add(distance[current_node],
+                                             reduced_cost);
+                                if (cost_less(next_distance,
+                                              distance[edge->to_node])) {
+                                    if (!cost_to_radix_key(next_distance,
+                                                           &radix_context,
+                                                           &next_key)) {
+                                        fail_with_message(
+                                            "internal radix heap key error");
+                                    }
+                                    distance[edge->to_node] = next_distance;
+                                    previous_node[edge->to_node] =
+                                        current_node;
+                                    previous_edge[edge->to_node] = edge_index;
+                                    radix_heap_push(&radix_heap,
+                                                    next_key,
+                                                    edge->to_node);
+                                }
+                            }
+                        }
                     }
-                    next_distance = cost_add(distance[current_node], reduced_cost);
-                    if (cost_less(next_distance, distance[edge->to_node])) {
-                        distance[edge->to_node] = next_distance;
-                        previous_node[edge->to_node] = current_node;
-                        previous_edge[edge->to_node] = edge_index;
-                        heap_push_or_decrease(&heap, next_distance, edge->to_node);
+                }
+                radix_heap_free(&radix_heap);
+            } else {
+                radix_heap_disabled = 1;
+                heap_push_or_decrease(&heap, cost_zero(), source_node);
+
+                while (heap_pop(&heap, &heap_item)) {
+                    int current_node = heap_item.node;
+                    int edge_index;
+                    if (settled[current_node] ||
+                        !cost_equal(heap_item.distance,
+                                    distance[current_node])) {
+                        continue;
+                    }
+                    settled[current_node] = 1;
+                    for (edge_index = 0;
+                         edge_index < graph->adjacency[current_node].size;
+                         edge_index++) {
+                        McfEdge *edge =
+                            &graph->adjacency[current_node].items[edge_index];
+                        if (edge->capacity > 0 && !settled[edge->to_node]) {
+                            Cost reduced_cost =
+                                cost_subtract(
+                                    cost_add(edge->cost,
+                                             potential[current_node]),
+                                    potential[edge->to_node]);
+                            Cost next_distance;
+                            if (cost_less(reduced_cost, cost_zero())) {
+                                fail_with_message(
+                                    "internal min-cost-flow potential error");
+                            }
+                            next_distance =
+                                cost_add(distance[current_node], reduced_cost);
+                            if (cost_less(next_distance,
+                                          distance[edge->to_node])) {
+                                distance[edge->to_node] = next_distance;
+                                previous_node[edge->to_node] = current_node;
+                                previous_edge[edge->to_node] = edge_index;
+                                heap_push_or_decrease(&heap,
+                                                      next_distance,
+                                                      edge->to_node);
+                            }
+                        }
                     }
                 }
             }
@@ -11967,6 +12402,12 @@ static void solver_profile_add_child_profile(SolverProfile *profile,
     profile->active_arc_template_misses +=
         read_profile_long_long_or_zero(profile_path,
                                        "active_arc_template_misses");
+    profile->radix_heap_attempts +=
+        read_profile_long_long_or_zero(profile_path, "radix_heap_attempts");
+    profile->radix_heap_used +=
+        read_profile_long_long_or_zero(profile_path, "radix_heap_used");
+    profile->radix_heap_fallbacks +=
+        read_profile_long_long_or_zero(profile_path, "radix_heap_fallbacks");
     profile->weighted_bound_prunes +=
         read_profile_long_long_or_zero(profile_path, "weighted_bound_prunes");
     profile->weighted_corner_cache_hits +=
@@ -12338,6 +12779,15 @@ static void solver_profile_write(const char *profile_path,
         fprintf(profile_file,
                 "active_arc_template_misses\t%lld\n",
                 profile->active_arc_template_misses) < 0 ||
+        fprintf(profile_file,
+                "radix_heap_attempts\t%lld\n",
+                profile->radix_heap_attempts) < 0 ||
+        fprintf(profile_file,
+                "radix_heap_used\t%lld\n",
+                profile->radix_heap_used) < 0 ||
+        fprintf(profile_file,
+                "radix_heap_fallbacks\t%lld\n",
+                profile->radix_heap_fallbacks) < 0 ||
         fprintf(profile_file,
                 "weighted_bound_prunes\t%lld\n",
                 profile->weighted_bound_prunes) < 0 ||

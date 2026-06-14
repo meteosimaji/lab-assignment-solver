@@ -190,6 +190,13 @@ feasible set or objective value.
   still rebuilds edge costs, residual capacities, reverse edges, and
   laboratory lower-bound edges, so no residual flow state or objective-specific
   cost can leak between solves.
+- Radix heap Dijkstra path: the radix heap is used only after every positive
+  residual edge has nonnegative reduced `(first, second, third)` components and
+  the solver can choose overflow-checked scales `B_2` and `B_1` such that
+  `first*B_1 + second*B_2 + third` preserves the lexicographic order for every
+  simple path in the current residual graph.  Dijkstra distances then have
+  monotone unsigned integer keys, which is exactly the radix-heap requirement.
+  If any component sign or bound check fails, the existing binary heap is used.
 - Portfolio process parallelism: independent exact objective candidates run in
   parallel and are reduced deterministically.
 
